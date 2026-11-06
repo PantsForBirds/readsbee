@@ -1402,6 +1402,13 @@ enum {
     OptSoapyBandwith,
     OptSoapyEnableAgc,
     OptSoapyGainElement,
+    OptNetUuidRequire,
+    OptNetUuidPolicy,
+    OptNetUuidConfig,
+    OptNetUuidTimeout,
+    OptNetUuidAllowFile,
+    OptNetUuidDenyFile,
+    OptNetUuidStatusDir,
 };
 
 

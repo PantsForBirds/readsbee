@@ -11,3 +11,5 @@ viewadsb
 .version
 cprtests
 crctests
+beetests
+policy/*.so
