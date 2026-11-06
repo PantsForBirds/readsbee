@@ -770,7 +770,15 @@ void beeWriteJson(int64_t now) {
                     beeStateName(c->bee.state, c->bee.reason), c->bee.code, sources,
                     c->bee.flagged ? "true" : "false", c->bee.dropped);
             p = appendExtCounts(p, end, c->bee.ext, NULL, c->bee.ee, NULL);
-            p = safe_snprintf(p, end, ",\"since\":%.0f,", c->connectedSince / 1000.0);
+            // rates as in clients.json: averages over the connection
+            double elapsed = (now - c->connectedSince) / 1000.0;
+            if (elapsed < 0.001)
+                elapsed = 0.001;
+            p = safe_snprintf(p, end, ",\"since\":%.0f,\"conn_s\":%.0f,\"kbps\":%.2f,\"messages_s\":%.3f,"
+                    "\"positions_s\":%.3f,\"messages\":%" PRIu64 ",\"positions\":%" PRIu64 ",",
+                    c->connectedSince / 1000.0, elapsed, c->bytesReceived / 128.0 / elapsed,
+                    (double) c->messageCounter / elapsed, (double) c->positionCounter / elapsed,
+                    (uint64_t) c->messageCounter, (uint64_t) c->positionCounter);
             p = beeFramesJson(p, end, c->bee.frames, NULL);
             if (c->bee.timing.when)
                 p = safe_snprintf(p, end, ",\"last_timed\":{\"type\":\"%02x\",\"clock\":\"%s\",\"epoch\":%u,\"age\":%.1f}",

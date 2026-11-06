@@ -345,6 +345,7 @@ def test_v2(ip):
         ro = next((r for r in (rb or {}).get("receivers", []) if r.get("uuid") == GOOD), {})
         check(ro.get("frames", {}).get("adsl") == 5 and ro["frames"]["uat"] == 0, f"other receiver: 5 ADS-L (random address, paraglider) {ro.get('frames')}")
         check(r.get("last_timed", {}).get("clock") in ("modes", "not_mlat", "unsynced"), f"timing kept: {r.get('last_timed')}")
+        check(r.get("messages_s", 0) > 0 and r.get("positions", 0) > 0, f"v2 receiver rates: {r.get('messages_s')} msg/s, {r.get('positions')} positions")
         check(rb and rb["frames"]["adsl"] == 95 and rb["drones"] == 2, "readsbee.json totals")
         st = load(os.path.join(jdir, "stats.json"), lambda x: x.get("total", {}).get("remote", {}).get("readsbee", {}).get("adsl") == 95)
         sr = (st or {}).get("total", {}).get("remote", {}).get("readsbee", {})
@@ -542,6 +543,16 @@ def main():
         check(not os.path.exists(os.path.join(jdir, "readsbee.json")), "readsbee.json not in the web root")
         cl = load(os.path.join(jdir, "clients.json"))
         check(cl is not None and cl["format"][-1] == "positions", "clients.json format unchanged")
+        # clients.json columns per receiver in readsbee.json (no addresses)
+        rb = load(os.path.join(sdir, "readsbee.json"), lambda d: d["now"] > rb["now"], 15) if rb else None
+        g = next((r for r in (rb or {}).get("receivers", []) if r.get("uuid") == GOOD), {})
+        c = next((c for c in (cl or {}).get("clients", []) if c[0] == GOOD), None)
+        check(all(k in g for k in ("conn_s", "kbps", "messages_s", "positions_s", "messages", "positions")),
+              f"readsbee.json receiver rates: {[(k, g.get(k)) for k in ('conn_s', 'kbps', 'messages_s', 'positions_s', 'messages', 'positions')]}")
+        check(g.get("messages", 0) >= 70 and g.get("kbps", 0) > 0 and g.get("conn_s", 0) >= 5
+              and abs(g["messages_s"] * g["conn_s"] - g["messages"]) <= max(2, 0.05 * g["messages"]), "rates consistent")
+        check(c is not None and c[8] == g.get("positions") and abs(c[4] * c[3] - g.get("messages", -99)) <= max(2, 0.05 * g.get("messages", 0)),
+              f"rates match clients.json (positions {c[8] if c else None}, msgs ~{round(c[4] * c[3]) if c else None})")
         malformed = stats["total"].get("remote_malformed_beast", 0) if stats else -1
         check(malformed == 0, f"no malformed beast bytes from extension frames ({malformed})")
     finally:

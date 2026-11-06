@@ -120,7 +120,9 @@ Drones are not in `aircraft.json` or the globe unless `--readsbee-rid-globe` is 
 Per type: `adsl`, `rid`, `uat`, `uat_mlat` (upper case with ts ≠ 0), `bad`.
 - `stats.json`: `remote.readsbee` in each period (`last1min`, `total`, ...).
 - `readsbee.json`: `frames` in total and per receiver (with `since` = connection start and
-  `last_timed`), `drones` = drones listed now.
+  `last_timed`), `drones` = drones listed now. Each receiver also has the `clients.json` columns
+  without addresses: `conn_s`, `kbps`, `messages_s`, `positions_s` (averages over the
+  connection), `messages`, `positions`.
 
 | option | |
 |---|---|
