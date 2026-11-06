@@ -61,7 +61,8 @@ readsbee. readsb exits if the plugin can't be loaded.
 ## Feed protocol v2
 
 ADSBee feeds set to `READSBEE` (firmware `AT+FEED=…,READSBEE`) add these Beast frames to Mode S.
-Every payload bounds itself; `0x1a` in a body is doubled.
+Every payload bounds itself; `0x1a` in a body is doubled. Full spec:
+[docs/FEED-PROTOCOL.md](docs/FEED-PROTOCOL.md).
 
 | frame | after `0x1a <type>` | |
 |---|---|---|
