@@ -1,12 +1,13 @@
 # readsbee
 
-readsb with a UUID ingest filter, for aggregators that take Beast feeds. A small fork of
+readsb with a UUID ingest filter and ADS-L / Remote ID decoding, for aggregators that take
+Beast feeds. A small fork of
 [wiedehopf/readsb](https://github.com/wiedehopf/readsb) (GPL-3.0-or-later, all credit for readsb
 to its authors).
 
 Branches: `dev` mirrors upstream, `readsbee` = `dev` + the files below. Merge upstream with
-`git merge dev` on `readsbee`. readsbee code lives in `readsbee.c/.h`; upstream files only get
-short hooks.
+`git merge dev` on `readsbee`. readsbee code lives in `readsbee.c/.h` and `readsbee_ext.c`
+(v2 frames); upstream files only get short hooks.
 
 ## UUID filter
 
@@ -57,20 +58,84 @@ void readsbee_policy_reload(const char *arg);                // optional, config
 or any plugin with `cc -O2 -fPIC -shared -I. plugin.c -o plugin.so` against the same libc as
 readsbee. readsb exits if the plugin can't be loaded.
 
-## Extension frames
+## Feed protocol v2
 
-Unknown Beast types `0xE0`-`0xFF` (`0xE9`, `0xEE`, ...) are skipped up to the next frame start
-without counting as garbage (stock readsb with `--net-ingest` drops a feed once they outnumber
-Mode S frames about 5:1). They are counted per type, `0xEE` also per subtype, and never
-forwarded. `0xEC` UAT is decoded as upstream. Frames over 576 escaped bytes count as garbage.
+ADSBee feeds set to `READSBEE` (firmware `AT+FEED=…,READSBEE`) add these Beast frames to Mode S.
+Every payload bounds itself; `0x1a` in a body is doubled.
+
+| frame | after `0x1a <type>` | |
+|---|---|---|
+| `0xEC` UAT | `s l u` / `S L U`, ts6, power1, 30 / 48 / 552 bytes | decoded as upstream; upper case = ts on the feed's Mode S clock |
+| `0xED` ADS-L | `A B X` (868.2, 868.4, unknown), ts6, dBm1, repaired1, L, L bytes | decoded into the aircraft table |
+| `0xEF` Remote ID | `B C E W N` (BT4, BT5 coded, BT5 1M, Wi-Fi beacon, NaN), ts6, dBm1, MAC6, ODID message or pack | decoded into the drone table |
+
+- dBm is signed, `0x80` = none. Lower case letters: ts is not on the Mode S clock (never MLAT);
+  upper case with ts 0: not synced yet. The last timed frame of each connection (ts, clock,
+  epoch: +1 when ts drops back to 0, i.e. the sub-GHz clock was re-based) is kept for a later MLAT path.
+- Unknown letters, failed bounds (L > 31, pack size ≠ 25, count > 9), bad ADS-L CRC: that frame
+  is skipped and counted as `bad`. Other `0xE0`-`0xFF` types are skipped up to the next frame
+  start without counting as garbage, counted per type. Frames over 576 escaped bytes are garbage.
+- Nothing readsbee decodes itself goes to any output (`beast_out`, `beast_reduce_plus_out`,
+  SBS, ...). UAT stays as upstream: converted to ADS-R-style DF18 messages like any readsb.
+- Feeds blocked by the UUID filter: frames are dropped, not decoded.
+- Reference decoder and golden vectors: `tests/readsbee_proto.py`, `tests/vectors/`.
+
+### ADS-L
+
+Traffic payloads (EASA ADS-L 4 SRD-860 Issue 2, M-band, key 0 or clear, CRC checked) become
+aircraft like SBS input (`type` `other`, which stock tar1090 shows as "Other"):
+
+- address: AMT 5 (ICAO) uses the ICAO address, so it merges with the aircraft's Mode S / ADS-B
+  record; every other address table (random, FLARM, OGN, FANET, ...) goes to the non-ICAO space
+  (`~xxxxxx`), like TIS-B / ADS-R non-ICAO addresses.
+- position, `alt_geom` (WGS-84), `gs`, `track`, `geom_rate`, ground / airborne, emergency.
+- `category` from the ADS-L aircraft category: light / heavy fixed wing A1 / A3, rotorcraft,
+  eVTOL, gyro A7, glider B1, balloon B2, parachutist B3, ultralight, paraglider, hang glider,
+  paramotor B4, UAS / model B6.
+- `aircraft.json` and `/re-api/` add `"adsl":{"amt":5,"cat":4,"ch":868.4,"dbm":-91,"seen":0.4}`
+  while ADS-L was heard in the last 60 s. `filter_uuid` works as for Mode S (positions).
+- Status payloads are counted only.
+
+### Remote ID
+
+ODID messages (Basic ID, Location, Self-ID, System, Operator ID; Auth counted only) and packs
+build one entry per drone, keyed by UAS ID (serial preferred over CAA, session, UTM IDs) and
+linked to the MACs it was heard from (BLE legacy sends one message per packet). Each drone has a
+stable non-ICAO `hex` (hash of its ID). Drones are listed for `--readsbee-rid-timeout` (300 s).
+
+| output | where | operator location / ID |
+|---|---|---|
+| `remoteid.json` | `--write-json` dir (web root) | only with `--readsbee-rid-operator` |
+| `/re-api/?remoteid[&filter_uuid=<uuid>]` | API port | only with `--readsbee-rid-operator` |
+| `remoteid-full.json` | `--net-uuid-status-dir` (staff) | always, plus MACs and receiver UUIDs |
+
+Drone fields: `hex id id_type ua_type id2 id2_type transports lat lon seen_pos status alt_geom_m
+alt_baro_m height_m height_ref gs_mps vrate_mps track self_id class_type eu_category eu_class dbm
+messages seen first receivers`, plus `operator{lat lon loc_type alt_geom_m} operator_id`.
+Drones are not in `aircraft.json` or the globe unless `--readsbee-rid-globe` is given (then:
+`type` `other`, `category` B6, `"rid":{"seen":…}`).
+
+### Counts
+
+Per type: `adsl`, `rid`, `uat`, `uat_mlat` (upper case with ts ≠ 0), `bad`.
+- `stats.json`: `remote.readsbee` in each period (`last1min`, `total`, ...).
+- `readsbee.json`: `frames` in total and per receiver (with `since` = connection start and
+  `last_timed`), `drones` = drones listed now.
+
+| option | |
+|---|---|
+| `--readsbee-rid-operator` | operator location / ID in public outputs (default off) |
+| `--readsbee-rid-globe` | drones also as aircraft |
+| `--readsbee-rid-timeout=<s>` | drones listed this long after the last message (300) |
 
 ## Status
 
 `readsbee.json` in `--net-uuid-status-dir`, every 10 s: settings, counters per reason,
 `rejected` (UUID, reason, plugin code, open connections, first / last seen, kept 24 h) and
-`receivers` (UUID, state, code, sources, flagged, dropped messages, extension frame counts).
-No addresses. It's meant for staff: keep the directory out of any web root (tar1090 serves
-`--write-json` as `/data/`). Nothing is added to `stats.json` or `clients.json`.
+`receivers` (UUID, state, code, sources, flagged, dropped messages, extension frame counts,
+v2 frame counts). No addresses. It's meant for staff: keep the directory out of any web root
+(tar1090 serves `--write-json` as `/data/`). Filter details stay out of `stats.json` and
+`clients.json`; `remoteid-full.json` is written next to `readsbee.json`.
 
 ## Image
 
@@ -84,4 +149,7 @@ readsbee built `WITH_UUIDS=yes`. Same env vars as ultrafeeder; add the options a
 ```
 make test WITH_UUIDS=yes                                        # includes beetests
 python3 tests/readsbee_net_test.py ./readsb policy/example.so   # end to end over TCP
+python3 tests/gen_bee_vectors.py                                # after editing tests/vectors/*.json
 ```
+
+`tests/vectors/odid_vectors.json` comes from the Open Drone ID core library (`tests/odid_gen.c`).

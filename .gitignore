@@ -13,3 +13,4 @@ cprtests
 crctests
 beetests
 policy/*.so
+__pycache__/

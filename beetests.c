@@ -17,6 +17,23 @@ struct char_buffer writeJsonToFile(const char *dir, const char *file, struct cha
     return cb;
 }
 
+// captured instead of going to the tracker
+static struct messageBuffer testMb;
+static struct modesMessage testMsgs[64];
+static int testUsed;
+
+struct modesMessage *netGetMM(struct messageBuffer *buf) {
+    MODES_NOTUSED(buf);
+    struct modesMessage *mm = &testMsgs[testUsed % 64];
+    memset(mm, 0, sizeof(*mm));
+    return mm;
+}
+
+void netUseMessage(struct modesMessage *mm) {
+    MODES_NOTUSED(mm);
+    testUsed++;
+}
+
 static int fails, checks;
 #define CHECK(cond) do { checks++; if (!(cond)) { fails++; fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); } } while (0)
 
@@ -312,6 +329,262 @@ static void testExtFrames(void) {
     CHECK(c.bee.ee[0x02] == 1 && c.bee.ee[0x01] == 1);
 }
 
+// --- v2 frames ---
+
+struct feedVec { const char *name; const char *wire; int len; int type; const char *kind; char letter; int64_t ts; int dbm; int unknown; };
+struct adslVec { const char *name; const char *pkt; int len; int crc_ok; int ptype; int amt; uint32_t addr; int cat; int fstate;
+    double lat, lon, alt, gs, vrate, track; };
+struct odidVec { const char *name; const char *msg; int len; const char *id; int idType; int uaType; int loc; int status;
+    double lat, lon, altGeo, altBaro, height; int heightType; double gs, vrate, track; const char *selfId;
+    int sys; double opLat, opLon, opAlt; int opLocType; const char *opId; };
+#include "tests/bee_vectors.h"
+
+#define NEAR(a, b, eps) (fabs((a) - (b)) <= (eps))
+
+static void testFeedVectors(void) {
+    uint8_t body[256];
+    int blen;
+    for (size_t i = 0; i < sizeof(feedVecs) / sizeof(feedVecs[0]); i++) {
+        const struct feedVec *v = &feedVecs[i];
+        const char *p = v->wire + 1; // type byte
+        const char *eod = v->wire + v->len;
+        if (v->type != 0xED && v->type != 0xEF)
+            continue;
+        int r = beeExtParse(p, eod, body, &blen);
+        CHECK(r == v->len - 1);
+        if (r != v->len - 1)
+            fprintf(stderr, "  vector %s: %d\n", v->name, r);
+        int64_t ts = 0;
+        for (int j = 0; j < 6; j++)
+            ts = ts << 8 | body[j];
+        CHECK(ts == v->ts);
+        CHECK((int8_t) body[6] == v->dbm);
+        // every shorter read is incomplete, never bad
+        for (int n = 1; n < v->len - 1; n++)
+            CHECK(beeExtParse(p, p + n, body, &blen) == 0);
+    }
+
+    // unknown type / unknown letter: that frame only is skipped, the Mode S frame after it stays
+    for (size_t i = 0; i < sizeof(feedVecs) / sizeof(feedVecs[0]); i++) {
+        const struct feedVec *v = &feedVecs[i];
+        if (!v->unknown)
+            continue;
+        struct client c;
+        memset(&c, 0, sizeof(c));
+        char *buf = (char *) v->wire;
+        int len = beeExtFrame(&c, buf + 1, buf + v->len, NOW, &testMb);
+        CHECK(len > 0 && buf[1 + len] == 0x1a && buf[2 + len] == '2');
+        CHECK(v->len - (1 + len) == 16); // 0x1a 0x32 ts6 rssi1 msg7, no escapes in the tail
+        int bad = (strcmp(v->name, "unknown_uat_letter") == 0);
+        CHECK((int) c.bee.frames[BEE_FT_BAD] == bad);
+    }
+
+    // bounds: L 0 / 32, pack size != 25, count 0 / 10, unknown letter
+    const char l32[] = { (char) 0xED, 'A', 0, 0, 0, 0, 0, 0, (char) 0x94, 0, 32 };
+    CHECK(beeExtParse(l32, l32 + sizeof(l32), body, &blen) == -1);
+    const char l0[] = { (char) 0xED, 'B', 0, 0, 0, 0, 0, 0, (char) 0x94, 0, 0 };
+    CHECK(beeExtParse(l0, l0 + sizeof(l0), body, &blen) == -1);
+    const char q[] = { (char) 0xED, 'Q', 0 };
+    CHECK(beeExtParse(q, q + sizeof(q), body, &blen) == -1);
+    char pk[] = { (char) 0xEF, 'W', 0, 0, 0, 0, 0, 0, (char) 0xc4, 1, 2, 3, 4, 5, 6, (char) 0xF2, 24, 3 };
+    CHECK(beeExtParse(pk, pk + sizeof(pk), body, &blen) == -1);
+    pk[16] = 25; pk[17] = 0;
+    CHECK(beeExtParse(pk, pk + sizeof(pk), body, &blen) == -1);
+    pk[17] = 10;
+    CHECK(beeExtParse(pk, pk + sizeof(pk), body, &blen) == -1);
+    pk[17] = 9;
+    CHECK(beeExtParse(pk, pk + sizeof(pk), body, &blen) == 0); // fine, wants 225 more bytes
+    pk[1] = 'z';
+    CHECK(beeExtParse(pk, pk + sizeof(pk), body, &blen) == -1);
+}
+
+static void testAdsl(void) {
+    // spec examples
+    // CRC over network header + data; key 3 is sent in clear, key 0 scrambled (XXTEA round trip)
+    uint8_t w[20];
+    for (int j = 0; j < 20; j++)
+        w[j] = j * 13;
+    CHECK(beeCrc24(w, 0) == 0);
+
+    for (size_t i = 0; i < sizeof(adslVecs) / sizeof(adslVecs[0]); i++) {
+        const struct adslVec *v = &adslVecs[i];
+        int before = fails;
+        struct beeAdsl a;
+        int r = beeAdslDecode((const uint8_t *) v->pkt, v->len, &a);
+        if (!v->crc_ok) {
+            CHECK(r == BEE_ADSL_CRC);
+            continue;
+        }
+        CHECK(r == BEE_ADSL_OK);
+        if (r != BEE_ADSL_OK) {
+            fprintf(stderr, "  vector %s: %d\n", v->name, r);
+            continue;
+        }
+        CHECK(a.ptype == v->ptype && a.amt == v->amt && a.addr == v->addr);
+        if (v->ptype != 2) {
+            CHECK(!a.traffic);
+            continue;
+        }
+        CHECK(a.traffic && a.cat == v->cat && a.fstate == v->fstate);
+        CHECK(isnan(v->lat) ? !a.pos_valid : (a.pos_valid && NEAR(a.lat, v->lat, 1e-9) && NEAR(a.lon, v->lon, 1e-9)));
+        CHECK(isnan(v->alt) ? !a.alt_valid : (a.alt_valid && a.alt_m == (int) v->alt));
+        CHECK(isnan(v->gs) ? !a.gs_valid : (a.gs_valid && NEAR(a.gs_mps, v->gs, 1e-9)));
+        CHECK(isnan(v->vrate) ? !a.vr_valid : (a.vr_valid && NEAR(a.vr_mps, v->vrate, 1e-9)));
+        CHECK(NEAR(a.track, v->track, 1e-9));
+        if (fails != before)
+            fprintf(stderr, "  vector %s\n", v->name);
+    }
+
+    // a real packet in an 0xED frame -> one aircraft message, address by AMT, nothing else
+    const struct adslVec *v = &adslVecs[0];
+    char frame[128];
+    int n = 0;
+    frame[n++] = (char) 0xED;
+    frame[n++] = 'B';
+    const uint8_t hdr[] = { 0x00, 0x00, 0x01, 0x1a, 0x00, 0x05, (uint8_t) -87, 2 };
+    for (size_t j = 0; j < sizeof(hdr); j++) {
+        frame[n++] = hdr[j];
+        if (hdr[j] == 0x1a)
+            frame[n++] = 0x1a;
+    }
+    for (int j = 0; j < v->len; j++) {
+        frame[n++] = v->pkt[j];
+        if ((uint8_t) v->pkt[j] == 0x1a)
+            frame[n++] = 0x1a;
+    }
+    frame[n] = 0x1a;
+    frame[n + 1] = '3';
+    struct client c;
+    memset(&c, 0, sizeof(c));
+    c.receiverId = 0xbee0003ca8bd5d38ULL;
+    testUsed = 0;
+    CHECK(beeExtFrame(&c, frame, frame + n + 2, NOW, &testMb) == n);
+    CHECK(testUsed == 1 && c.bee.frames[BEE_FT_ADSL] == 1 && c.bee.frames[BEE_FT_BAD] == 0);
+    struct modesMessage *mm = &testMsgs[0];
+    CHECK(mm->addr == 0xBEE000); // AMT 5: ICAO
+    CHECK(mm->bee.kind == 1 && mm->bee.amt == 5 && mm->bee.channel == 1 && mm->bee.dbm == -87);
+    CHECK(mm->bee.clock == BEE_CLK_MODES && mm->bee.ts == 0x0000011a0005LL);
+    CHECK(mm->sbs_in && mm->sbs_pos_valid && NEAR(mm->decoded_lat, v->lat, 1e-9));
+    CHECK(mm->geom_alt_valid && mm->geom_alt == 3281 && mm->category_valid && mm->category == 0xA1);
+    CHECK(mm->addrtype == ADDR_OTHER && mm->receiverId == c.receiverId);
+    CHECK(c.bee.timing.type == 0xED && c.bee.timing.clock == BEE_CLK_MODES);
+
+    // lower case: not MLAT; pending connection: dropped, not decoded
+    frame[1] = 'b';
+    testUsed = 0;
+    beeExtFrame(&c, frame, frame + n + 2, NOW, &testMb);
+    CHECK(testMsgs[0].bee.clock == BEE_CLK_NOT_MLAT);
+    c.bee.state = BEE_PENDING;
+    testUsed = 0;
+    CHECK(beeExtFrame(&c, frame, frame + n + 2, NOW, &testMb) == n);
+    CHECK(testUsed == 0 && c.bee.dropped == 1 && c.bee.frames[BEE_FT_ADSL] == 2);
+
+    // UAT clock flags
+    memset(&c, 0, sizeof(c));
+    beeUatFrame(&c, 's', 12345, NOW);
+    beeUatFrame(&c, 'S', 0, NOW);
+    beeUatFrame(&c, 'L', 777, NOW);
+    CHECK(c.bee.frames[BEE_FT_UAT] == 3 && c.bee.frames[BEE_FT_UAT_MLAT] == 1);
+    CHECK(c.bee.timing.clock == BEE_CLK_MODES && c.bee.timing.ts == 777 && c.bee.timing.epoch == 0);
+    beeUatFrame(&c, 'S', 0, NOW); // mode switch: ts 0 again -> new clock epoch
+    beeUatFrame(&c, 'S', 5, NOW);
+    CHECK(c.bee.timing.epoch == 1 && c.bee.timing.clock == BEE_CLK_MODES);
+}
+
+static int jsonHas(const char *json, const char *needle) {
+    int ok = strstr(json, needle) != NULL;
+    if (!ok)
+        fprintf(stderr, "  missing %s\n", needle);
+    return ok;
+}
+
+static void testRemoteId(void) {
+    const uint8_t mac[6] = { 0xc0, 0xff, 0xee, 0x1a, 0x00, 0x01 };
+    char want[256];
+    char *buf;
+    int len;
+    for (size_t i = 0; i < sizeof(odidVecs) / sizeof(odidVecs[0]); i++) {
+        const struct odidVec *v = &odidVecs[i];
+        int before = fails;
+        beeRidReset();
+        beeRidInput((const uint8_t *) v->msg, v->len, mac, 'w', -60, 0xbee0000000000001ULL, 2, NOW, NULL, NULL);
+        CHECK(beeRidCount() == 1);
+        CHECK(beeRidJson(&buf, &len, 0, 0, 0, NOW));
+        if (v->id[0] && v->idType == 1) {
+            snprintf(want, sizeof(want), "\"id\":\"%s\",\"id_type\":\"serial\",\"ua_type\":%d", v->id, v->uaType);
+            CHECK(jsonHas(buf, want));
+        }
+        if (v->idType == 4)
+            CHECK(jsonHas(buf, "\"id_type\":\"session\""));
+        if (v->loc && !(v->lat == 0 && v->lon == 0)) {
+            snprintf(want, sizeof(want), "\"lat\":%.7f,\"lon\":%.7f", v->lat, v->lon);
+            CHECK(jsonHas(buf, want));
+            snprintf(want, sizeof(want), "\"alt_geom_m\":%.1f,\"alt_baro_m\":%.1f,\"height_m\":%.1f,\"height_ref\":\"%s\",\"gs_mps\":%.2f,\"vrate_mps\":%.1f,\"track\":%.0f",
+                    v->altGeo, v->altBaro, v->height, v->heightType ? "ground" : "takeoff", v->gs, v->vrate, v->track);
+            CHECK(jsonHas(buf, want));
+        }
+        if (v->loc && v->lat == 0 && v->lon == 0)
+            CHECK(!strstr(buf, "\"lat\"") && !strstr(buf, "gs_mps") && !strstr(buf, "track"));
+        if (v->selfId[0]) {
+            snprintf(want, sizeof(want), "\"self_id\":\"%s\"", v->selfId);
+            CHECK(jsonHas(buf, want));
+        }
+        if (v->sys) {
+            snprintf(want, sizeof(want), "\"operator\":{\"lat\":%.7f,\"lon\":%.7f,\"loc_type\":\"live\",\"alt_geom_m\":%.1f}",
+                    v->opLat, v->opLon, v->opAlt);
+            CHECK(jsonHas(buf, want));
+            CHECK(jsonHas(buf, "\"eu_category\":1,\"eu_class\":2"));
+        }
+        if (v->opId[0]) {
+            snprintf(want, sizeof(want), "\"operator_id\":\"%s\"", v->opId);
+            CHECK(jsonHas(buf, want));
+        }
+        CHECK(jsonHas(buf, "\"transports\":[\"wifi_beacon\"]") && jsonHas(buf, "\"dbm\":-60"));
+        CHECK(jsonHas(buf, "\"macs\":[\"c0:ff:ee:1a:00:01\"]") && jsonHas(buf, "\"uuids\":[\"bee00000-0000-0001-0000-000000000002\"]"));
+        free(buf);
+        // public: no operator data, no MACs, no UUIDs
+        CHECK(beeRidJson(&buf, &len, 0, 1, 0, NOW));
+        CHECK(!strstr(buf, "operator") || strstr(buf, "\"operator\":false"));
+        CHECK(!strstr(buf, "\"operator\":{") && !strstr(buf, "operator_id") && !strstr(buf, "macs") && !strstr(buf, "uuids"));
+        free(buf);
+        if (fails != before)
+            fprintf(stderr, "  vector %s\n", v->name);
+    }
+
+    // BLE legacy: Location before Basic ID on the same MAC -> one drone with the serial; same serial
+    // over Wi-Fi with another MAC -> still one drone, two transports; filter by receiver
+    const struct odidVec *basic = &odidVecs[0], *loc = &odidVecs[2];
+    const uint8_t mac2[6] = { 0x6a, 0x1a, 0x2b, 0x3c, 0x4d, 0x5e };
+    beeRidReset();
+    beeRidInput((const uint8_t *) loc->msg, 25, mac, 'b', -80, 0x1111, 1, NOW, NULL, NULL);
+    beeRidInput((const uint8_t *) basic->msg, 25, mac, 'b', -80, 0x1111, 1, NOW + 100, NULL, NULL);
+    CHECK(beeRidCount() == 1);
+    beeRidInput((const uint8_t *) basic->msg, 25, mac2, 'w', -70, 0x2222, 2, NOW + 200, NULL, NULL);
+    CHECK(beeRidCount() == 1);
+    CHECK(beeRidJson(&buf, &len, 0, 0, 0, NOW + 300));
+    CHECK(jsonHas(buf, "\"transports\":[\"bt4_legacy\",\"wifi_beacon\"]") && jsonHas(buf, "\"receivers\":2"));
+    CHECK(jsonHas(buf, "\"lat\":47.3977419") && jsonHas(buf, "\"id\":\"1581F5FKD229400ABCDE\""));
+    free(buf);
+    CHECK(beeRidJson(&buf, &len, 0, 1, 0x2222, NOW + 300) && strstr(buf, "1581F5FKD229400ABCDE"));
+    free(buf);
+    CHECK(beeRidJson(&buf, &len, 0, 1, 0x3333, NOW + 300) && !strstr(buf, "1581F5FKD229400ABCDE"));
+    free(buf);
+    // timeout: listed for ridTimeout, then gone
+    CHECK(beeRidJson(&buf, &len, 0, 1, 0, NOW + 200 + Bee.ridTimeout) && !strstr(buf, "hex"));
+    free(buf);
+
+    // --readsbee-rid-globe: Location becomes an aircraft message, category B6, non-ICAO address
+    struct client c;
+    memset(&c, 0, sizeof(c));
+    Bee.ridGlobe = 1;
+    testUsed = 0;
+    beeRidInput((const uint8_t *) odidVecs[8].msg, odidVecs[8].len, mac, 'w', -60, 1, 1, NOW, &testMb, &c);
+    CHECK(testUsed == 1 && testMsgs[0].bee.kind == 2 && testMsgs[0].category == 0xB6);
+    CHECK((testMsgs[0].addr & MODES_NON_ICAO_ADDRESS) && testMsgs[0].sbs_pos_valid);
+    Bee.ridGlobe = 0;
+    beeRidReset();
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr, "usage: beetests policy/example.so\n");
@@ -332,6 +605,9 @@ int main(int argc, char **argv) {
     testLoopback();
     testClients(dir, plugin);
     testExtFrames();
+    testFeedVectors();
+    testAdsl();
+    testRemoteId();
     rmdir(dir);
     fprintf(stderr, "beetests: %d checks, %d failed\n", checks, fails);
     return fails ? 1 : 0;

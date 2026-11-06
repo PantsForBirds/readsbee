@@ -57,6 +57,7 @@ struct apiOptions {
     int filter_interesting;
     int filter_pia;
     int filter_ladd;
+    int bee_remoteid; // readsbee: ?remoteid
     int filter_with_pos;
     int filter_callsign_exact;
     uint64_t filter_uuid;

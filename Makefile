@@ -194,7 +194,7 @@ readsb.o: readsb.c *.h .version
 readsb: readsb.o argp.o anet.o interactive.o mode_ac.o mode_s.o comm_b.o json_out.o net_io.o crc.o demod_2400.o \
 	uat2esnt/uat2esnt.o uat2esnt/uat_decode.o \
 	stats.o cpr.o icao_filter.o track.o util.o fasthash.o convert.o sdr_ifile.o sdr_beast.o sdr.o ais_charset.o \
-	globe_index.o geomag.o receiver.o aircraft.o api.o threadpool.o readsbee.o \
+	globe_index.o geomag.o receiver.o aircraft.o api.o threadpool.o readsbee.o readsbee_ext.o \
 	$(SDR_OBJ) $(COMPAT)
 	$(CC) -o $@ $^ $(LDFLAGS) $(LIBS) $(LIBS_SDR) $(OPTIMIZE)
 
@@ -210,12 +210,13 @@ clean:
 test: cprtest crctest beetest
 
 beetest: beetests policy/example.so
+	python3 tests/gen_bee_vectors.py --check
 	./beetests policy/example.so
 
 policy/example.so: policy/example.c readsbee_policy.h
 	$(CC) -std=c11 -W -Wall -Werror -O2 -fPIC -shared -I. $< -o $@
 
-beetests: beetests.o readsbee.o util.o threadpool.o fasthash.o $(COMPAT)
+beetests: beetests.o readsbee.o readsbee_ext.o util.o threadpool.o fasthash.o $(COMPAT)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $^ -o $@ $(LDFLAGS) $(LIBS)
 
 cprtest: cprtests

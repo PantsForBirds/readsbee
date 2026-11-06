@@ -1024,6 +1024,7 @@ struct modesMessage
     addrtype_t addrtype; // address format / source
     int8_t remote; // If set this message is from a remote station
     int8_t sbs_in; // Signifies this message is coming from basestation input
+    struct beeMsg bee; // readsbee: ADS-L / Remote ID decoded by readsbee, never forwarded
     int8_t address_reliable;
     int8_t sbsMsgType; // SBS message type
     int8_t reduce_forward; // forward this message for reduced beast output
@@ -1409,6 +1410,9 @@ enum {
     OptNetUuidAllowFile,
     OptNetUuidDenyFile,
     OptNetUuidStatusDir,
+    OptReadsbeeRidGlobe,
+    OptReadsbeeRidOperator,
+    OptReadsbeeRidTimeout,
 };
 
 

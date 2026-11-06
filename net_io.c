@@ -5019,17 +5019,18 @@ static int decodeEncapsulatedUAT(struct client *c, char *msg, int remote, int64_
     char *p = msg;
 
     int bytes = 0;
-    if (*p == 'u') {
+    char letter = *p; // readsbee: upper case S/L/U = ts on the Mode S clock
+    if ((*p | 0x20) == 'u') {
         bytes = 552;
         out = safe_snprintf(out, end, "+");
         if (debugIncomplete) {
             fprintTimePrecise(stderr, mstime());
             fprintf(stderr, "uat uplink bytes in buffer: %d\n", (int) (c->eod - p));
         }
-    } else if (*p == 's') {
+    } else if ((*p | 0x20) == 's') {
         bytes = 30;
         out = safe_snprintf(out, end, "-");
-    } else if (*p == 'l') {
+    } else if ((*p | 0x20) == 'l') {
         bytes = 48;
         out = safe_snprintf(out, end, "-");
     } else {
@@ -5060,6 +5061,12 @@ static int decodeEncapsulatedUAT(struct client *c, char *msg, int remote, int64_
     }
 
 
+    if (*p == 0x1a) { // readsbee: the power byte is escaped too (0x1a = level 26)
+        if (p + 2 >= c->eod)
+            return 0;
+        if (*++p != 0x1a)
+            return -1;
+    }
     double signalLevel = ((unsigned char) *p / 255.0);
     //fprintf(stderr, "level: %d %f\n", (unsigned char) *p, signalLevel);
     signalLevel = signalLevel * signalLevel;
@@ -5099,6 +5106,7 @@ static int decodeEncapsulatedUAT(struct client *c, char *msg, int remote, int64_
     }
 
     //fprintf(stderr, "passing to decodeUatMessage: %s\n", buf);
+    beeUatFrame(c, letter, timestamp, now); // readsbee: counts, clock
     decodeUatMessage(c, buf, 1, now, mb);
 
     if (p - msg == 0 && debugIncomplete) {
@@ -5766,7 +5774,9 @@ static int readBeast(struct client *c, int64_t now, struct messageBuffer *mb) {
         } else if (ch == 0xec) {
             // 0x1a | 0xec | s/l/u byte (short / long / uplink) | 6 byte MLAT timestamp | rssi byte |  payload
             p++;
-            if (*p == 's' || *p == 'l' || *p == 'u') {
+            if (p >= c->eod)
+                break; // readsbee: letter not here yet
+            if (*p == 's' || *p == 'l' || *p == 'u' || *p == 'S' || *p == 'L' || *p == 'U') {
 
                 if (0 && *p != 'u') {
                     char sample[512];
@@ -5797,8 +5807,11 @@ static int readBeast(struct client *c, int64_t now, struct messageBuffer *mb) {
                     continue;
                 }
             } else {
-                // malformed message, skip
-                c->som++;
+                // readsbee: unknown UAT letter, skip this frame only
+                int len = beeExtFrame(c, p - 1, c->eod, now, mb);
+                if (len == 0)
+                    break;
+                c->som = (len > 0) ? p - 1 + len : c->som + 2;
                 continue;
             }
         } else if (ch == 0xe4) {
@@ -5847,13 +5860,12 @@ static int readBeast(struct client *c, int64_t now, struct messageBuffer *mb) {
             c->som += 2;
             continue;
         } else if (ch >= BEE_EXT_FIRST) {
-            // readsbee: unknown extension frame (0xE9 ADSBee info, 0xEE ADS-L / Remote ID, ...),
-            // skip it whole without counting it as garbage, never forwarded
-            int len = beeExtFrameLen(p, c->eod);
+            // readsbee: 0xED ADS-L / 0xEF Remote ID decoded, other extension frames skipped
+            // whole without counting as garbage. Never forwarded.
+            int len = beeExtFrame(c, p, c->eod, now, mb);
             if (len == 0)
                 break; // incomplete
             if (len > 0) {
-                beeCountExt(c, p, len);
                 c->som = p + len;
                 continue;
             }
@@ -6827,6 +6839,8 @@ static char *read_uuid(struct client *c, char *p, char *eod) {
 }
 
 static void outputMessage(struct modesMessage *mm) {
+    if (mm->bee.kind) // readsbee: ADS-L / Remote ID stay local (aircraft table, JSON, API)
+        return;
     // filter messages with unwanted DF types (sbs_in are unknown DF type, filter them all, this is arbitrary but no one cares anyway)
     if (Modes.filterDF && (mm->sbs_in || !(Modes.filterDFbitset & (1u << mm->msgtype)))) {
         return;
