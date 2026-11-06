@@ -2130,6 +2130,9 @@ struct aircraft *trackUpdateFromMessage(struct modesMessage *mm) {
         }
     }
 
+    if (mm->bee.kind || mm->bee.hasDbm)
+        beeTrackUpdate(a, mm, now); // readsbee
+
     // don't use messages with unreliable CRC too long after receiving a reliable address from an aircraft
     if (now - a->seen > TRACK_STALE) {
         res = NULL;

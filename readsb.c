@@ -2138,6 +2138,18 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
         case OptNetUuidAllowFile:
             Bee.allow.f.path = strdup(arg);
             break;
+        case OptReadsbeeRidGlobe:
+            Bee.ridGlobe = 1;
+            break;
+        case OptReadsbeeRidOperator:
+            Bee.ridOperator = 1;
+            break;
+        case OptReadsbeeCaps:
+            Bee.capsAccept = (uint16_t) (strtoul(arg, NULL, 0) & BEE_CAP_KNOWN);
+            break;
+        case OptReadsbeeRidTimeout:
+            Bee.ridTimeout = (int64_t) (atof(arg) * SECONDS);
+            break;
         case OptNetUuidDenyFile:
             Bee.deny.f.path = strdup(arg);
             break;

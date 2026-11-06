@@ -649,6 +649,7 @@ char *sprintAircraftObject(char *p, char *end, struct aircraft *a, int64_t now, 
                     p = safe_snprintf(p, end, ",\"year\":\"%.*s\"", (int) sizeof(a->year), a->year);
             }
         }
+        p = beeJsonAircraft(p, end, a, now); // readsbee
 
         if (Modes.json_separate_ground) {
             if (altBaroReliable(a)) {

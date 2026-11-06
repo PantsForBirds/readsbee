@@ -1478,12 +1478,23 @@ static struct char_buffer parseFetch(struct apiCon *con, struct char_buffer *req
             } else if (byteMatchStrict(option, "filter_ladd")) {
                 options->filter_dbFlag = 1;
                 options->filter_ladd = 1;
+            } else if (byteMatchStrict(option, "remoteid")) {
+                options->bee_remoteid = 1; // readsbee
             } else if (byteMatchStrict(option, "include_version")) {
                 con->include_version = 1;
             } else {
                 return invalid;
             }
         }
+    }
+    if (options->bee_remoteid) { // readsbee: drones, optionally per receiver
+        struct char_buffer cb = { 0 };
+        int len = 0;
+        options->zstd_encode = 0;
+        con->content_type = "application/json";
+        if (beeApiRemoteId(options->filter_uuid, API_REQ_PADSTART, &cb.buffer, &len))
+            cb.len = len;
+        return cb;
     }
     int mainOptionCount = options->is_box
         + options->is_circle

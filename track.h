@@ -595,6 +595,8 @@ struct aircraft
   idTime recentReceiverIds[RECENT_RECEIVER_IDS];
 #endif
 
+  struct beeAircraft bee; // readsbee: ADS-L / Remote ID
+
   char zeroEnd;
 };
 

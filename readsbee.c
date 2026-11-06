@@ -10,6 +10,8 @@
 struct beeConfig Bee = {
     .timeout = 15 * SECONDS,
     .reuseReject = 1,
+    .ridTimeout = 300 * SECONDS,
+    .capsAccept = BEE_CAP_KNOWN,
     .mutex = PTHREAD_MUTEX_INITIALIZER,
 };
 
@@ -693,6 +695,7 @@ static char *appendExtCounts(char *p, char *end, const uint32_t *ext32, const ui
 // readsbee.json: filter status for staff (reasons, no addresses). Keep the status dir out of
 // any web root.
 void beeWriteJson(int64_t now) {
+    beeWriteRemoteId(now); // readsbee_ext.c, every 2 s
     static int64_t next;
     if (!Bee.statusDir || now < next)
         return;
@@ -718,7 +721,9 @@ void beeWriteJson(int64_t now) {
     }
     p = safe_snprintf(p, end, "},\"reuse_flagged\":%" PRIu64 ",", Bee.reuse_flagged);
     p = appendExtCounts(p, end, NULL, Bee.ext_frames, NULL, Bee.ee_frames);
-    p = safe_snprintf(p, end, ",\"ext_too_long\":%" PRIu64, Bee.ext_too_long);
+    p = safe_snprintf(p, end, ",\"ext_too_long\":%" PRIu64 ",", Bee.ext_too_long);
+    p = beeFramesJson(p, end, NULL, Bee.frames);
+    p = safe_snprintf(p, end, ",\"drones\":%d", beeRidCount());
 
     p = safe_snprintf(p, end, ",\n\"rejected\":[");
     pthread_mutex_lock(&Bee.mutex);
@@ -766,6 +771,25 @@ void beeWriteJson(int64_t now) {
                     beeStateName(c->bee.state, c->bee.reason), c->bee.code, sources,
                     c->bee.flagged ? "true" : "false", c->bee.dropped);
             p = appendExtCounts(p, end, c->bee.ext, NULL, c->bee.ee, NULL);
+            // rates as in clients.json: averages over the connection
+            double elapsed = (now - c->connectedSince) / 1000.0;
+            if (elapsed < 0.001)
+                elapsed = 0.001;
+            p = safe_snprintf(p, end, ",\"since\":%.0f,\"conn_s\":%.0f,\"kbps\":%.2f,\"messages_s\":%.3f,"
+                    "\"positions_s\":%.3f,\"messages\":%" PRIu64 ",\"positions\":%" PRIu64 ",",
+                    c->connectedSince / 1000.0, elapsed, c->bytesReceived / 128.0 / elapsed,
+                    (double) c->messageCounter / elapsed, (double) c->positionCounter / elapsed,
+                    (uint64_t) c->messageCounter, (uint64_t) c->positionCounter);
+            p = beeFramesJson(p, end, c->bee.frames, NULL);
+            if (c->bee.capsState)
+                p = safe_snprintf(p, end, ",\"caps\":{\"offered\":%u,\"active\":%u,\"confirmed\":%s}",
+                        c->bee.capsOffered, c->bee.capsActive,
+                        (c->bee.capsState & BEE_CAPS_CONFIRMED) ? "true" : "false");
+            if (c->bee.timing.when)
+                p = safe_snprintf(p, end, ",\"last_timed\":{\"type\":\"%02x\",\"clock\":\"%s\",\"epoch\":%u,\"age\":%.1f}",
+                        c->bee.timing.type, c->bee.timing.clock == BEE_CLK_MODES ? "modes"
+                        : c->bee.timing.clock == BEE_CLK_UNSYNCED ? "unsynced" : "not_mlat", c->bee.timing.epoch,
+                        (now - c->bee.timing.when) / 1000.0);
             p = safe_snprintf(p, end, "}");
             sep = ",\n";
         }

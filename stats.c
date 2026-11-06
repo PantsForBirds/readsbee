@@ -345,6 +345,7 @@ void add_stats(const struct stats *st1, const struct stats *st2, struct stats *t
     target->remote_received_modeac = st1->remote_received_modeac + st2->remote_received_modeac;
     target->remote_received_modes = st1->remote_received_modes + st2->remote_received_modes;
     target->remote_received_basestation_valid = st1->remote_received_basestation_valid + st2->remote_received_basestation_valid;
+    for (i = 0; i < BEE_FT_COUNT; i++) target->bee_frames[i] = st1->bee_frames[i] + st2->bee_frames[i]; // readsbee
     target->remote_received_basestation_invalid = st1->remote_received_basestation_invalid + st2->remote_received_basestation_invalid;
     target->remote_rejected_bad = st1->remote_rejected_bad + st2->remote_rejected_bad;
     target->remote_rejected_delayed = st1->remote_rejected_delayed + st2->remote_rejected_delayed;
@@ -579,6 +580,7 @@ static char * appendStatsJson(char *p, char *end, struct stats *st, const char *
 
         p = safe_snprintf(p, end, ",\"bytes_in\": %lu", (long) st->network_bytes_in);
         p = safe_snprintf(p, end, ",\"bytes_out\": %lu", (long) st->network_bytes_out);
+        p = beeStatsJson(p, end, st->bee_frames); // readsbee
 
         p = safe_snprintf(p, end, "}");
     }
