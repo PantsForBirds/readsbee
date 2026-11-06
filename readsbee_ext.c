@@ -219,15 +219,24 @@ static unsigned adslCategory(int cat) {
 // -40 dBm), capped at 1. Built once at startup: no pow per frame.
 static double dbmLevel[256];
 
+// tests: READSBEE_SIGNAL_LOG=<file> logs each frame's signal byte as read ("<fd> power|dbm <byte>")
+static FILE *signalLog;
+
 __attribute__((constructor)) static void initDbmLevel(void) {
     for (int b = 0; b < 256; b++) {
         int d = (int8_t) b;
         double l = pow(10, 0.075 * (d + 40));
         dbmLevel[b] = (d == -128) ? 0 : (l > 1 ? 1 : l);
     }
+    const char *log = getenv("READSBEE_SIGNAL_LOG");
+    if (log && *log && (signalLog = fopen(log, "a")))
+        setvbuf(signalLog, NULL, _IOLBF, 0);
 }
 
 double beeSignal(const struct client *c, uint8_t b, struct beeMsg *bm) {
+    if (unlikely(signalLog != NULL))
+        fprintf(signalLog, "%d %s %u\n", c ? c->fd : -1,
+                (c && (c->bee.capsActive & BEE_CAP_SIG_DBM)) ? "dbm" : "power", b);
     if (c && (c->bee.capsActive & BEE_CAP_SIG_DBM)) {
         if (bm) {
             bm->dbm = (int8_t) b;

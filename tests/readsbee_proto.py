@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """readsbee feed protocol v3.2: reference encoder/decoder.
 
-Spec: FEED-PROTOCOL.md. Golden vectors: vectors.json.
-  python3 readsbee_proto.py           check against vectors.json -> "vectors ok"
-  python3 readsbee_proto.py --write   regenerate vectors.json
+Spec: FEED-PROTOCOL.md. Golden vectors: vectors/feed_vectors.json (vectors.json in the spec folder).
+  python3 readsbee_proto.py           check against the vectors -> "vectors ok"
+  python3 readsbee_proto.py --write   regenerate them
 
 Wire rules (all frames): 0x1a <type> [<msg type letter>] <body>. Every 0x1a in <body> is sent
 twice. The type byte and the msg type letter are never escaped (and never 0x1a).
@@ -666,7 +666,7 @@ def check(path: Path) -> int:
 
 
 if __name__ == "__main__":
-    vp = Path(__file__).with_name("vectors.json")
+    vp = Path(__file__).parent / "vectors" / "feed_vectors.json"  # readsbee repo layout
     if "--write" in sys.argv:
         vp.write_text(json.dumps(build_vectors(), indent=1) + "\n")
         print("wrote", vp)

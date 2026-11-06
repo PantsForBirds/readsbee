@@ -4,7 +4,7 @@
   python3 tests/gen_bee_vectors.py            write tests/bee_vectors.h
   python3 tests/gen_bee_vectors.py --check    exit 1 if tests/bee_vectors.h is stale (CI)
 
-feed_v2_vectors.json: readsbee feed protocol v2 golden vectors (FEED-PROTOCOL.md)
+feed_vectors.json:    readsbee feed protocol v3.2 golden vectors (FEED-PROTOCOL.md, readsbee_proto.py)
 adsl_vectors.json:    ADS-L packets from the reference encoder
 odid_vectors.json:    ODID messages from opendroneid-core-c (tests/odid_gen.c)
 """
@@ -13,6 +13,8 @@ import sys
 from pathlib import Path
 
 D = Path(__file__).parent
+sys.path.insert(0, str(D))
+import readsbee_proto as P  # noqa: E402
 V = D / "vectors"
 
 
@@ -30,28 +32,45 @@ def cstr(s):
 
 
 def feed():
+    vecs = json.loads((V / "feed_vectors.json").read_text())
     out = ["static const struct feedVec feedVecs[] = {"]
-    for v in json.loads((V / "feed_v2_vectors.json").read_text()):
-        if v["name"] == "mixed_stream":
+    for v in vecs:
+        if v["name"] == "mixed_stream" or v.get("direction") == "server_to_feeder" or len(v["decoded"]) != 1:
             continue
         b, n = cbytes(v["hex"])
         d = v["decoded"][0] if v["decoded"] else {}
+        if d.get("type") == 0xE5:
+            continue
         kind = d.get("kind", "")
         letter = ""
         if d.get("type") in (0xEC, 0xED, 0xEF):
             letter = chr(bytes.fromhex(v["hex"])[2])
-        dbm = d.get("dbm", -128 if "dbm" in d else 0)
-        dbm = -128 if dbm is None else dbm
+        # signal byte as sent, and whether it is int8 dBm (vector signal_mode dbm)
+        dbm_mode = "dbm" in d
+        sig = P.dbm_byte(d["dbm"]) if dbm_mode else d.get("rssi", 0)
         out.append(f'    {{ {cstr(v["name"])}, {b}, {n}, 0x{d.get("type", 0):02x}, {cstr(kind)}, '
-                   f'{(repr(letter) if letter else "0")}, {d.get("ts", 0)}LL, {dbm}, {v["unknown"]} }},')
+                   f'{(repr(letter) if letter else "0")}, {d.get("ts", 0)}LL, {sig}, {int(dbm_mode)}, {v["unknown"]} }},')
     out.append("};")
-    mixed = next(v for v in json.loads((V / "feed_v2_vectors.json").read_text()) if v["name"] == "mixed_stream")
+    mixed = next(v for v in vecs if v["name"] == "mixed_stream")
     b, n = cbytes(mixed["hex"])
     types = ", ".join(f'0x{d["type"]:02x}' for d in mixed["decoded"])
     out.append(f"static const char feedMixed[] = {b};")
     out.append(f"static const int feedMixedLen = {n};")
     out.append(f"static const int feedMixedTypes[] = {{ {types} }};")
     out.append(f"static const int feedMixedUnknown = {mixed['unknown']};")
+    # 0xE5 frames on their own: valid (Q / A / C, bits) or malformed
+    out.append("static const struct capsVec capsVecs[] = {")
+    for v in vecs:
+        w = bytes.fromhex(v["hex"])
+        if len(w) != 6 or w[:2] != bytes([0x1A, 0xE5]):
+            continue
+        r = P.dec_caps_body(w[2:])
+        b, n = cbytes(v["hex"])
+        out.append(f'    {{ {cstr(v["name"])}, {b}, {int(r is not None)}, {repr(r[0]) if r else "0"}, {r[2] if r else 0} }},')
+    out.append("};")
+    # signalLevel for every dBm byte (readsbee_proto.signal_level_from_dbm)
+    lv = ", ".join(repr(P.signal_level_from_dbm(P.dbm_from_byte(i))) for i in range(256))
+    out.append(f"static const double dbmLevels[256] = {{ {lv} }};")
     return out
 
 

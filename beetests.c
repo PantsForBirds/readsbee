@@ -331,7 +331,8 @@ static void testExtFrames(void) {
 
 // --- v2 frames ---
 
-struct feedVec { const char *name; const char *wire; int len; int type; const char *kind; char letter; int64_t ts; int dbm; int unknown; };
+struct feedVec { const char *name; const char *wire; int len; int type; const char *kind; char letter; int64_t ts; int sig; int dbmMode; int unknown; };
+struct capsVec { const char *name; const char *wire; int valid; char letter; int bits; };
 struct adslVec { const char *name; const char *pkt; int len; int crc_ok; int ptype; int amt; uint32_t addr; int cat; int fstate;
     double lat, lon, alt, gs, vrate, track; };
 struct odidVec { const char *name; const char *msg; int len; const char *id; int idType; int uaType; int loc; int status;
@@ -358,7 +359,15 @@ static void testFeedVectors(void) {
         for (int j = 0; j < 6; j++)
             ts = ts << 8 | body[j];
         CHECK(ts == v->ts);
-        CHECK((int8_t) body[6] == v->dbm);
+        CHECK(body[6] == v->sig);
+        // the signal byte follows the connection's mode (v3.2): dBm only after 'C' with bit 0
+        struct client c;
+        memset(&c, 0, sizeof(c));
+        c.bee.capsActive = v->dbmMode ? BEE_CAP_SIG_DBM : 0;
+        struct beeMsg bm = { 0 };
+        double l = beeSignal(&c, body[6], &bm);
+        CHECK(v->dbmMode ? (bm.hasDbm == (v->sig != 0x80) && NEAR(l, dbmLevels[v->sig], 1e-12))
+                         : (!bm.hasDbm && NEAR(l, (v->sig / 255.0) * (v->sig / 255.0), 1e-12)));
         // every shorter read is incomplete, never bad
         for (int n = 1; n < v->len - 1; n++)
             CHECK(beeExtParse(p, p + n, body, &blen) == 0);
@@ -396,6 +405,61 @@ static void testFeedVectors(void) {
     CHECK(beeExtParse(pk, pk + sizeof(pk), body, &blen) == 0); // fine, wants 225 more bytes
     pk[1] = 'z';
     CHECK(beeExtParse(pk, pk + sizeof(pk), body, &blen) == -1);
+}
+
+static void testCaps(void) {
+    for (size_t i = 0; i < sizeof(capsVecs) / sizeof(capsVecs[0]); i++) {
+        const struct capsVec *v = &capsVecs[i];
+        struct client c;
+        memset(&c, 0, sizeof(c));
+        char answer[BEE_CAPS_LEN];
+        int alen = -1;
+        int r = beeCapsFrame(&c, v->wire + 1, v->wire + 6, answer, &alen);
+        if (!v->valid) {
+            CHECK(r == -1 && alen == 0 && c.bee.capsState == 0);
+            continue;
+        }
+        CHECK(r == 5);
+        for (int n = 1; n < 5; n++) // shorter: incomplete
+            CHECK(beeCapsFrame(&c, v->wire + 1, v->wire + 1 + n, answer, &alen) == 0);
+        if (v->letter == 'Q') {
+            // answered once, with every known bit by default: 1a e5 41 81 8f 80
+            CHECK(c.bee.capsOffered == v->bits && c.bee.capsActive == 0);
+            int a2;
+            CHECK(beeCapsFrame(&c, v->wire + 1, v->wire + 6, answer, &a2) == 5 && a2 == 0);
+        } else if (v->letter == 'C') {
+            CHECK(c.bee.capsActive == (v->bits & BEE_CAP_KNOWN) && (c.bee.capsState & BEE_CAPS_CONFIRMED));
+        } else {
+            CHECK(c.bee.capsState == 0 && c.bee.capsActive == 0); // 'A' from a feeder: ignored
+        }
+    }
+    struct client c;
+    memset(&c, 0, sizeof(c));
+    char answer[BEE_CAPS_LEN];
+    int alen;
+    const char q[] = { 0x1a, (char) 0xE5, 'Q', (char) 0x81, (char) 0x8F, (char) 0x80 };
+    CHECK(beeCapsFrame(&c, q + 1, q + 6, answer, &alen) == 5 && alen == 6
+          && memcmp(answer, "\x1a\xe5\x41\x81\x8f\x80", 6) == 0);
+    // --readsbee-caps narrows the answer and the confirmed bits
+    memset(&c, 0, sizeof(c));
+    Bee.capsAccept = BEE_CAP_RID;
+    CHECK(beeCapsFrame(&c, q + 1, q + 6, answer, &alen) == 5 && memcmp(answer, "\x1a\xe5\x41\x81\x84\x80", 6) == 0);
+    const char cf[] = { 0x1a, (char) 0xE5, 'C', (char) 0x81, (char) 0x8F, (char) 0x80 };
+    CHECK(beeCapsFrame(&c, cf + 1, cf + 6, answer, &alen) == 5 && alen == 0 && c.bee.capsActive == BEE_CAP_RID);
+    Bee.capsAccept = BEE_CAP_KNOWN;
+    // a second 'C' changes nothing
+    const char c0[] = { 0x1a, (char) 0xE5, 'C', (char) 0x81, (char) 0x80, (char) 0x80 };
+    CHECK(beeCapsFrame(&c, c0 + 1, c0 + 6, answer, &alen) == 5 && c.bee.capsActive == BEE_CAP_RID);
+
+    // dBm table: every byte as readsbee_proto.signal_level_from_dbm; no connection = power byte
+    memset(&c, 0, sizeof(c));
+    c.bee.capsActive = BEE_CAP_SIG_DBM;
+    int bad = 0;
+    for (int b = 0; b < 256; b++) {
+        bad += !NEAR(beeSignal(&c, b, NULL), dbmLevels[b], 1e-12);
+        bad += !NEAR(beeSignal(NULL, b, NULL), (b / 255.0) * (b / 255.0), 1e-15);
+    }
+    CHECK(bad == 0);
 }
 
 static void testAdsl(void) {
@@ -614,6 +678,7 @@ int main(int argc, char **argv) {
     testClients(dir, plugin);
     testExtFrames();
     testFeedVectors();
+    testCaps();
     testAdsl();
     testRemoteId();
     rmdir(dir);
