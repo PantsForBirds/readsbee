@@ -402,11 +402,17 @@ static int logAllowed(int64_t now) {
     return ++lines <= 20;
 }
 
+// The PROXY header source counts only when the TCP peer is loopback (a local proxy):
+// anyone can send a PROXY header.
+static int proxyTrusted(struct client *c) {
+    return beeIsLoopback(c->host) && c->proxy_string[0]
+        && strncmp(c->proxy_string, c->host, strlen(c->host)) != 0;
+}
+
 static void setSource(struct client *c) {
     char src[64];
     const char *s = c->host;
-    if (c->proxy_string[0] && strncmp(c->proxy_string, c->host, strlen(c->host)) != 0
-            && proxySource(c->proxy_string, src, sizeof(src)))
+    if (proxyTrusted(c) && proxySource(c->proxy_string, src, sizeof(src)))
         s = src;
     c->bee.src = fasthash64(s, strlen(s), 0x5eed5eed5eed5eedULL);
 }
@@ -531,15 +537,14 @@ void beeClientAccept(struct client *c, int64_t now) {
     c->bee.state = beeIsLoopback(c->host) ? BEE_EXEMPT : BEE_PENDING;
 }
 
-// PROXY v1 header names the real peer
+// PROXY v1 header from a local proxy names the real peer. It can end the loopback
+// exemption, never grant it.
 void beeClientProxy(struct client *c) {
     if (c->bee.state == BEE_OFF)
         return;
     setSource(c);
     if (c->bee.state == BEE_EXEMPT && !beeProxyIsLoopback(c->proxy_string))
         c->bee.state = BEE_PENDING;
-    else if (c->bee.state == BEE_PENDING && beeProxyIsLoopback(c->proxy_string))
-        c->bee.state = BEE_EXEMPT;
 }
 
 // first valid 0xE4 UUID of the connection

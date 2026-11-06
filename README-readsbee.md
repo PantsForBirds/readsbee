@@ -36,7 +36,8 @@ Config file (`key = value`, `#` comments):
 - **Rejected**: connection stays open, data dropped, nothing sent back. An allow-file edit
   accepts it without a reconnect; a deny-file edit cuts an accepted one.
 - **Loopback** (127.0.0.0/8, ::1, unix sockets) is exempt, e.g. mlathub to `localhost:30004`.
-  A PROXY v1 header with a remote source cancels the exemption and is the source address.
+  A PROXY v1 header from a loopback peer (local proxy) names the source; from anyone else it is
+  ignored. It can end the exemption, never grant it.
 - **Lists**: one UUID per line, `#` comments, dashes optional. Files are polled every 2 s
   (mtime, size, inode), so atomic rename works. Missing list = empty.
 - **Logs**: one line per rejected connection, each UUID at most every 10 min, 20 lines/min max.

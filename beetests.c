@@ -222,13 +222,24 @@ static void testClients(const char *dir, const char *plugin) {
     giveUuid(&r3, OK2);
     CHECK(r3.bee.state == BEE_OK);
 
-    // PROXY header source counts, not the proxy's address
+    // a local proxy's PROXY header source counts, not the proxy's address
     struct client p1;
-    mkClient(&p1, &beastIn, "10.0.0.5");
+    mkClient(&p1, &beastIn, "127.0.0.1");
     strcpy(p1.proxy_string, "TCP4 192.0.2.9 10.0.0.1 40000 30004");
     beeClientProxy(&p1);
+    CHECK(p1.bee.state == BEE_PENDING);
     giveUuid(&p1, OK2);
     CHECK(p1.bee.state == BEE_REJECTED && p1.bee.reason == BEE_R_REUSE);
+
+    // a remote peer's PROXY header is ignored: no exemption, its own address counts
+    struct client p2;
+    mkClient(&p2, &beastIn, "192.0.2.1");
+    strcpy(p2.proxy_string, "TCP4 127.0.0.1 10.0.0.1 40000 30004");
+    beeClientProxy(&p2);
+    CHECK(p2.bee.state == BEE_PENDING);
+    giveUuid(&p2, OK2);
+    CHECK(p2.bee.state == BEE_OK); // same source as r1
+    beeClientClose(&p2);
 
     // flag instead of reject, via a config reload
     writeFile(conf, "policy_arg = ab\nmax_sources = 2\nreuse_action = flag\n");

@@ -148,7 +148,7 @@ def main():
         time.sleep(1.5)
         icaos = {"good": 0xA00001, "good2": 0xA00002, "denied": 0xA00003, "foreign": 0xA00004,
                  "reuse3": 0xA00005, "nouuid": 0xA00006, "loop": 0xA00007, "early": 0xA00008,
-                 "reuse1": 0xA00009, "reuse2": 0xA0000A}
+                 "reuse1": 0xA00009, "reuse2": 0xA0000A, "spoof": 0xA0000B}
         socks = {}
 
         def feed(name, src, uuid, extra=b"", n=20, proxy_src=None):
@@ -180,11 +180,13 @@ def main():
         feed("good", ip, GOOD, ext)
         feed("denied", ip, DENIED)
         feed("foreign", ip, FOREIGN)
-        # same UUID from 3 source addresses (PROXY headers), max_sources = 2
-        feed("reuse1", ip, REUSED, proxy_src="192.0.2.1")
-        feed("reuse2", ip, REUSED, proxy_src="192.0.2.2")
+        # same UUID from 3 source addresses via a local proxy (PROXY headers), max_sources = 2
+        feed("reuse1", "127.0.0.1", REUSED, proxy_src="192.0.2.1")
+        feed("reuse2", "127.0.0.1", REUSED, proxy_src="192.0.2.2")
         time.sleep(0.3)
-        feed("reuse3", ip, REUSED, proxy_src="192.0.2.3")
+        feed("reuse3", "127.0.0.1", REUSED, proxy_src="192.0.2.3")
+        # a remote peer can't claim loopback with a PROXY header
+        feed("spoof", ip, None, proxy_src="127.0.0.1")
         feed("nouuid", ip, None)
         feed("loop", "127.0.0.1", None)
 
@@ -196,7 +198,7 @@ def main():
         check(icaos["early"] not in seen, "data before UUID: dropped")
         check(icaos["loop"] in seen, "loopback without UUID: exempt")
         check(icaos["reuse1"] in seen and icaos["reuse2"] in seen, "reused UUID: first 2 sources used")
-        for n in ("denied", "foreign", "reuse3", "nouuid"):
+        for n in ("denied", "foreign", "reuse3", "nouuid", "spoof"):
             check(icaos[n] not in seen, f"{n}: data dropped")
 
         time.sleep(3.5)
