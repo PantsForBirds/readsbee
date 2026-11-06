@@ -718,6 +718,8 @@ struct char_buffer generateStatsJson(int64_t now) {
 
     p = appendTypeCounts(p, end);
 
+    p = beeAppendStatsJson(p, end);
+
     p = appendStatsJson(p, end, &Modes.stats_1min, "last1min");
 
     p = appendStatsJson(p, end, &Modes.stats_5min, "last5min");

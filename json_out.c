@@ -2326,7 +2326,7 @@ struct char_buffer generateClientsJson() {
     p = safe_snprintf(p, end, "{ \"now\" : %.3f,\n", now / 1000.0);
     p = safe_snprintf(p, end, "  \"format\" : "
             "[ \"receiverId\", \"host:port\", \"avg. kbit/s\", \"conn time(s)\","
-            " \"messages/s\", \"positions/s\", \"reduce_signal\", \"recent_rtt(ms)\", \"positions\" ],\n");
+            " \"messages/s\", \"positions/s\", \"reduce_signal\", \"recent_rtt(ms)\", \"positions\", \"bee\" ],\n");
 
     p = safe_snprintf(p, end, "  \"clients\" : [\n");
 
@@ -2359,7 +2359,7 @@ struct char_buffer generateClientsJson() {
             double elapsed = (now - c->connectedSince) / 1000.0;
             int reduceSignaled = service->writer == &Modes.beast_in
                 && c->pingReceived + 120 * SECONDS > now;
-            p = safe_snprintf(p, end, "[\"%s\",\"%49s\",%6.2f,%6.0f,%8.3f,%7.3f, %d,%5.0f, %10lld],\n",
+            p = safe_snprintf(p, end, "[\"%s\",\"%49s\",%6.2f,%6.0f,%8.3f,%7.3f, %d,%5.0f, %10lld,\"%s\"],\n",
                     uuid,
                     proxy,
                     c->bytesReceived / 128.0 / elapsed,
@@ -2368,7 +2368,8 @@ struct char_buffer generateClientsJson() {
                     (double) c->positionCounter / elapsed,
                     reduceSignaled,
                     c->recent_rtt,
-                    (long long) c->positionCounter);
+                    (long long) c->positionCounter,
+                    beeStateName(c->bee.state, c->bee.reason));
 
 
 

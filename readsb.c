@@ -1010,6 +1010,7 @@ static void *decodeEntryPoint(void *arg) {
 
     pthread_mutex_lock(&Threads.decode.mutex);
 
+    beeInit();
     modesInitNet();
 
     /* If the user specifies --net-only, just run in order to serve network
@@ -2118,6 +2119,18 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
         case OptSdrBufSize:
             Modes.sdr_buf_size = atoi(arg) * 1024;
             break;
+        case OptNetRequireAdsbeeUuid:
+            Bee.require = 1;
+            break;
+        case OptNetUuidTimeout:
+            Bee.timeout = (int64_t) (atof(arg) * SECONDS);
+            break;
+        case OptNetUuidAllowFile:
+            Bee.allow.path = strdup(arg);
+            break;
+        case OptNetUuidDenyFile:
+            Bee.deny.path = strdup(arg);
+            break;
         case OptNetReceiverId:
             Modes.netReceiverId = 1;
             Modes.ping = 1;
@@ -3024,6 +3037,9 @@ static void miscStuff(int64_t now) {
 
         if (Modes.netIngest || Modes.enableClientsJson) {
             free(writeJsonToFile(Modes.json_dir, "clients.json", generateClientsJson()).buffer);
+        }
+        if (beeActive()) {
+            beeWriteJson(Modes.json_dir);
         }
 
         if (Modes.netReceiverIdJson) {

@@ -25,6 +25,7 @@
 #define NETIO_H
 
 #include <sys/socket.h>
+#include "readsbee.h"
 
 // Describes a networking service (group of connections)
 
@@ -153,6 +154,7 @@ struct client
     char host[NI_MAXHOST]; // For logging
     char port[NI_MAXSERV];
     int64_t dropHalfAntiSpam;
+    struct beeClient bee; // readsbee ingest filter
 };
 
 // Client connection
