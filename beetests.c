@@ -457,12 +457,20 @@ static void testAdsl(void) {
     struct client c;
     memset(&c, 0, sizeof(c));
     c.receiverId = 0xbee0003ca8bd5d38ULL;
+    // no confirmed bit 0: the signal byte a9 is a power byte
+    testUsed = 0;
+    CHECK(beeExtFrame(&c, frame, frame + n + 2, NOW, &testMb) == n);
+    CHECK(testUsed == 1 && !testMsgs[0].bee.hasDbm && NEAR(testMsgs[0].signalLevel, (169 / 255.0) * (169 / 255.0), 1e-12));
+    // after 'C' with bit 0: int8 dBm
+    memset(&c.bee.frames, 0, sizeof(c.bee.frames));
+    c.bee.capsActive = BEE_CAP_SIG_DBM;
     testUsed = 0;
     CHECK(beeExtFrame(&c, frame, frame + n + 2, NOW, &testMb) == n);
     CHECK(testUsed == 1 && c.bee.frames[BEE_FT_ADSL] == 1 && c.bee.frames[BEE_FT_BAD] == 0);
     struct modesMessage *mm = &testMsgs[0];
     CHECK(mm->addr == 0xBEE000); // AMT 5: ICAO
-    CHECK(mm->bee.kind == 1 && mm->bee.amt == 5 && mm->bee.channel == 1 && mm->bee.dbm == -87);
+    CHECK(mm->bee.kind == 1 && mm->bee.amt == 5 && mm->bee.channel == 1 && mm->bee.hasDbm && mm->bee.dbm == -87);
+    CHECK(NEAR(mm->signalLevel, pow(10, 0.075 * (-87 + 40)), 1e-12));
     CHECK(mm->bee.clock == BEE_CLK_MODES && mm->bee.ts == 0x0000011a0005LL);
     CHECK(mm->sbs_in && mm->sbs_pos_valid && NEAR(mm->decoded_lat, v->lat, 1e-9));
     CHECK(mm->geom_alt_valid && mm->geom_alt == 3281 && mm->category_valid && mm->category == 0xA1);
@@ -507,7 +515,7 @@ static void testRemoteId(void) {
         const struct odidVec *v = &odidVecs[i];
         int before = fails;
         beeRidReset();
-        beeRidInput((const uint8_t *) v->msg, v->len, mac, 'w', -60, 0xbee0000000000001ULL, 2, NOW, NULL, NULL);
+        beeRidInput((const uint8_t *) v->msg, v->len, mac, 'w', &(struct beeMsg) { .dbm = -60, .hasDbm = 1 }, 0.01, 0xbee0000000000001ULL, 2, NOW, NULL, NULL);
         CHECK(beeRidCount() == 1);
         CHECK(beeRidJson(&buf, &len, 0, 0, 0, NOW));
         if (v->id[0] && v->idType == 1) {
@@ -556,10 +564,10 @@ static void testRemoteId(void) {
     const struct odidVec *basic = &odidVecs[0], *loc = &odidVecs[2];
     const uint8_t mac2[6] = { 0x6a, 0x1a, 0x2b, 0x3c, 0x4d, 0x5e };
     beeRidReset();
-    beeRidInput((const uint8_t *) loc->msg, 25, mac, 'b', -80, 0x1111, 1, NOW, NULL, NULL);
-    beeRidInput((const uint8_t *) basic->msg, 25, mac, 'b', -80, 0x1111, 1, NOW + 100, NULL, NULL);
+    beeRidInput((const uint8_t *) loc->msg, 25, mac, 'b', &(struct beeMsg) { .dbm = -80, .hasDbm = 1 }, 0.01, 0x1111, 1, NOW, NULL, NULL);
+    beeRidInput((const uint8_t *) basic->msg, 25, mac, 'b', &(struct beeMsg) { .dbm = -80, .hasDbm = 1 }, 0.01, 0x1111, 1, NOW + 100, NULL, NULL);
     CHECK(beeRidCount() == 1);
-    beeRidInput((const uint8_t *) basic->msg, 25, mac2, 'w', -70, 0x2222, 2, NOW + 200, NULL, NULL);
+    beeRidInput((const uint8_t *) basic->msg, 25, mac2, 'w', &(struct beeMsg) { .dbm = -70, .hasDbm = 1 }, 0.01, 0x2222, 2, NOW + 200, NULL, NULL);
     CHECK(beeRidCount() == 1);
     CHECK(beeRidJson(&buf, &len, 0, 0, 0, NOW + 300));
     CHECK(jsonHas(buf, "\"transports\":[\"bt4_legacy\",\"wifi_beacon\"]") && jsonHas(buf, "\"receivers\":2"));
@@ -578,7 +586,7 @@ static void testRemoteId(void) {
     memset(&c, 0, sizeof(c));
     Bee.ridGlobe = 1;
     testUsed = 0;
-    beeRidInput((const uint8_t *) odidVecs[8].msg, odidVecs[8].len, mac, 'w', -60, 1, 1, NOW, &testMb, &c);
+    beeRidInput((const uint8_t *) odidVecs[8].msg, odidVecs[8].len, mac, 'w', &(struct beeMsg) { .dbm = -60, .hasDbm = 1 }, 0.01, 1, 1, NOW, &testMb, &c);
     CHECK(testUsed == 1 && testMsgs[0].bee.kind == 2 && testMsgs[0].category == 0xB6);
     CHECK((testMsgs[0].addr & MODES_NON_ICAO_ADDRESS) && testMsgs[0].sbs_pos_valid);
     Bee.ridGlobe = 0;

@@ -11,6 +11,7 @@ struct beeConfig Bee = {
     .timeout = 15 * SECONDS,
     .reuseReject = 1,
     .ridTimeout = 300 * SECONDS,
+    .capsAccept = BEE_CAP_KNOWN,
     .mutex = PTHREAD_MUTEX_INITIALIZER,
 };
 
