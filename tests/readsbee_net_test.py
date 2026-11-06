@@ -134,8 +134,7 @@ def main():
     open(deny, "w").write(DENIED + "  # blocked\n")
     conf = os.path.join(tmp, "readsbee.conf")
     open(conf, "w").write("policy_arg = ab\nmax_sources = 2\nreuse_action = reject\n")
-    sdir = os.path.join(tmp, "status")
-    os.mkdir(sdir)
+    sdir = os.path.join(tmp, "status")  # created by readsb
 
     log = open(os.path.join(tmp, "readsb.log"), "w")
     p = subprocess.Popen([READSB, "--net", "--net-only", "--quiet", f"--net-bi-port={PORT}",

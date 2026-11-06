@@ -508,6 +508,8 @@ static void beeAccept(struct client *c, int64_t now) {
 }
 
 void beeInit(void) {
+    if (Bee.statusDir && mkdir(Bee.statusDir, 0755) != 0 && errno != EEXIST)
+        fprintf(stderr, "readsbee: can't create %s: %s\n", Bee.statusDir, strerror(errno));
     beeConfigLoad(1);
     beeListLoad(&Bee.allow, 1);
     beeListLoad(&Bee.deny, 1);
