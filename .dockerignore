@@ -1,0 +1,6 @@
+*.o
+readsb
+viewadsb
+beetests
+cprtests
+crctests

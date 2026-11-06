@@ -15,6 +15,7 @@ on:
 
 jobs:
   docker:
+    if: github.repository == 'wiedehopf/readsb' # readsbee: images come from readsbee.yaml
     runs-on: ubuntu-latest
     permissions:
       packages: write

@@ -1228,6 +1228,7 @@ static void modesAcceptClients(int listen_fd, struct net_service *s, int64_t now
             exit(1);
         }
 
+        beeClientAccept(c, now);
         setSockopts(c);
 
         sendFiveHeartbeats(c, now);
@@ -1248,6 +1249,7 @@ static void modesCloseClient(struct client *c) {
         fprintf(stderr, "warning: double close of net client\n");
         return;
     }
+    beeClientClose(c);
     if (Modes.netIngest || Modes.netReceiverId || Modes.debug_no_discard) {
         double elapsed = (mstime() - c->connectedSince + 1) / 1000.0;
         double kbitpersecond = c->bytesReceived / 128.0 / elapsed;
@@ -4452,6 +4454,8 @@ static int handleBeastCommand(struct client *c, char *p, int remote, int64_t now
 //
 // to save a couple cycles we remove the escapes in the calling function and expect nonescaped messages here
 static int decodeBinMessage(struct client *c, char *p, int remote, int64_t now, struct messageBuffer *mb) {
+    if (*p != 'P' && beeDrop(c))
+        return 0;
     uint16_t msgLen = 0;
     int j;
     unsigned char ch;
@@ -5105,6 +5109,8 @@ static int decodeEncapsulatedUAT(struct client *c, char *msg, int remote, int64_
 
 static int decodeUatMessage(struct client *c, char *msg, int remote, int64_t now, struct messageBuffer *mb) {
     MODES_NOTUSED(remote);
+    if (beeDrop(c))
+        return 0;
 
     int msgLen = strlen(msg);
     char *end = msg + msgLen;
@@ -5840,6 +5846,22 @@ static int readBeast(struct client *c, int64_t now, struct messageBuffer *mb) {
             }
             c->som += 2;
             continue;
+        } else if (ch >= BEE_EXT_FIRST) {
+            // readsbee: unknown extension frame (0xE9 ADSBee info, 0xEE ADS-L / Remote ID, ...),
+            // skip it whole without counting it as garbage, never forwarded
+            int len = beeExtFrameLen(p, c->eod);
+            if (len == 0)
+                break; // incomplete
+            if (len > 0) {
+                beeCountExt(c, p, len);
+                c->som = p + len;
+                continue;
+            }
+            Bee.ext_too_long++;
+            c->som += 2;
+            Modes.stats_current.remote_malformed_beast += 2;
+            garbageIncrement(c, 2, __LINE__);
+            continue;
         } else {
             // Not a valid beast message, skip 0x1a
             // Skip following byte as well:
@@ -5980,6 +6002,7 @@ static int readProxy(struct client *c) {
             c->receiverId = fasthash64(proxy, space - proxy, 0x2127599bf4325c37ULL);
         }
 
+        beeClientProxy(c);
         c->som = eop + 2;
     }
     return 0;
@@ -6352,6 +6375,27 @@ static void decodeTask(void *arg, threadpool_threadbuffers_t *buffer_group) {
 //
 // Perform periodic network work
 //
+// readsbee: close connections without UUID, apply allow / deny list changes
+static void beePeriodicClients(int64_t now) {
+    static int64_t next;
+    if (!beeActive() || now < next)
+        return;
+    next = now + 1 * SECONDS;
+    int changed = beePoll(now);
+    for (struct net_service *service = Modes.services_in.services; service->descr; service++) {
+        if (service->read_mode != READ_MODE_BEAST)
+            continue;
+        for (struct client *c = service->clients; c; c = c->next) {
+            if (!c->service)
+                continue;
+            if (beeTimedOut(c, now))
+                modesCloseClient(c);
+            else if (changed)
+                beeEvaluate(c, now);
+        }
+    }
+}
+
 void modesNetPeriodicWork(void) {
     static int64_t check_flush;
     static int64_t next_tcp_json;
@@ -6471,6 +6515,8 @@ void modesNetPeriodicWork(void) {
     now = mstime();
 
     pingSenders(Modes.beast_in_service, now);
+
+    beePeriodicClients(now);
 
     int64_t elapsed2 = lapWatch(&watch);
 
@@ -6775,6 +6821,7 @@ static char *read_uuid(struct client *c, char *p, char *eod) {
             //fprintf(stderr, "ADDR %s,%s rId %016"PRIx64" UUID %.*s\n", c->host, c->port, c->receiverId, (int) imin(eod - start, 36), start);
         }
         lockReceiverId(c);
+        beeClientUuid(c, mstime());
     }
     return p;
 }
