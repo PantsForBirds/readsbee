@@ -624,6 +624,16 @@ def build_vectors() -> list[dict]:
     add("stream_dbm", conf + enc_mode_s(ds, 3, dbm=-87)
         + enc_adsl(adsl, ts, -87, "a", repaired=1) + enc_rid(_odid_msg(1, 0x33), 0, -87, "b", mac),
         "bits 0-3 confirmed: C 8f, then the same three frames, all with dBm a9")
+
+    # ---- Remote ID on the Mode S clock (ESP32 synced, adsbee #428): upper-case letter, real ts.
+    add("rid_bt4_modes_clock", enc_rid(_odid_msg(1, 0x1A), ts, -72, "b", mac, modes_clock=True),
+        "ESP32 synced: B, ts on the Mode S clock (~1 ms BLE callback time, not MLAT-grade)", mode="dbm")
+    add("rid_wifi_beacon_pack_modes_clock", enc_rid(pack, ts, None, "w", bytes.fromhex("6a1a2b3c4d5e"),
+                                                    modes_clock=True, rssi=dbm_to_power(-60)),
+        "W, ts on the Mode S clock (~2-4 us), pack, power byte 45")
+    add("rid_bt4_modes_clock_wrap", enc_rid(_odid_msg(1, 0x33), 0xFF_FF_FF_FF_FF_FF, -70, "b", mac, modes_clock=True)
+        + enc_rid(_odid_msg(1, 0x33), 2, -70, "b", mac, modes_clock=True),
+        "the 48-bit 12 MHz counter wraps: ffffffffffff, then 000000000002", mode="dbm")
     return v
 
 

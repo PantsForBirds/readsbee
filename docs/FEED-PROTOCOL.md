@@ -24,7 +24,7 @@ history; this document has no version number). Rules that came out of the review
   feed, no proof frame.
 
 Reference code: [`tests/readsbee_proto.py`](../tests/readsbee_proto.py) (`python3 tests/readsbee_proto.py` → `vectors ok`, checks
-[`tests/vectors/feed_vectors.json`](../tests/vectors/feed_vectors.json): 60 vectors; the `0xED`/`0xEF` vectors without
+[`tests/vectors/feed_vectors.json`](../tests/vectors/feed_vectors.json): 63 vectors; the `0xED`/`0xEF` vectors without
 `_power` are tagged `signal_mode: dbm`, i.e. after `C` with bit 0). Stock-server measurements (§10:
 `test_caps_stock.py`, `results/`, `results.txt`, `results-uat-msgtype.txt`) were made outside this
 repo and aren't included.
@@ -66,8 +66,8 @@ connection-start frame.
   - `0xED`/`0xEF` follow the same rule: ADS-L (decodes to about −108 dBm) reads 1 below
     −100 dBm in power-byte mode, and Remote ID above −40 dBm reads 255.
 - **Letter case = clock.** Upper case: ts6 is on this connection's Mode S clock (the 12 MHz
-  counter of its `0x32`/`0x33` frames), MLAT-grade; **ts6 = 0 means not synced yet** (about 2–3 s
-  after boot, maybe after a `SUBG_MODE` switch). Lower case: ts6 isn't on the Mode S clock;
+  counter of its `0x32`/`0x33` frames), MLAT-grade (Remote ID: same clock, coarser, §5);
+  **ts6 = 0 means not synced yet** (about 2–3 s after boot, maybe after a `SUBG_MODE` switch). Lower case: ts6 isn't on the Mode S clock;
   never use it for MLAT.
 - Every payload bounds itself, so there is no LEN byte (§3).
 - Largest frames, escaped worst case: UAT `U` 1 + 2 + 2 × 559 = 1121 (unchanged), Remote ID
@@ -114,9 +114,14 @@ this way (t-1061).
 - **mac6**: source address in display order (BLE AdvA, Wi-Fi SA). Needed: BLE legacy carries one
   ODID message per packet, and the address is what ties a drone's Basic ID to its Location.
 - **odid**: one ASTM F3411 25-byte message, or a message pack, as received.
-- **Timestamp.** The ESP32 only has ms time, not the Mode S clock. Send lower case with
-  **ts6 = 0**: readsbee stamps arrival time, which is good enough for Remote ID (no MLAT). Upper
-  case is kept for a later firmware that can time Remote ID on the Mode S clock.
+- **Timestamp.** When the ESP32 is synced to the Mode S clock (adsbee #428, shared SYNC pulse):
+  **upper case**, ts6 = the packet's time on this connection's Mode S 12 MHz clock (the 48 MHz
+  MLAT counter / 4, low 48 bits, wrapping like the Mode S frames'). Wi-Fi beacons use the MAC's
+  receive timestamp (about 2–4 µs); BLE has none, so it's the callback time (about 1 ms after the
+  air time). It orders Remote ID against Mode S but is **not MLAT-grade**. Not synced
+  yet: **lower case with ts6 = 0**, and readsbee stamps arrival time. The firmware doesn't send
+  upper case with ts6 = 0 for Remote ID. Vectors `rid_bt4_modes_clock`,
+  `rid_wifi_beacon_pack_modes_clock`, `rid_bt4_modes_clock_wrap`.
 - Left out (minimal): BLE address type (public / random; collisions between drones are
   negligible), channel, ODID counter (dedupe only, firmware drops it today), CRC/version.
 
@@ -506,5 +511,5 @@ Added with the dBm capability:
 11. **Calibration wording:** "uncalibrated, ±2.5 dB absolute, 1 dB resolution". Please confirm
     the ±2.5 dB figure; I couldn't find it in the repos or the library.
 
-Still open: Remote ID ts6 (keep 0, recommended); readsbee phase 2 scope (`S L U`,
+Still open: readsbee phase 2 scope (`S L U`,
 `0xED`, `0xEF`, now plus the `0xE5` answer); sub-GHz clock jitter (t-1056); BLE address type.

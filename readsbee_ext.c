@@ -405,7 +405,7 @@ static void decodeRidFrame(struct client *c, char letter, const uint8_t *body, i
         struct messageBuffer *mb) {
     int64_t ts = ts48(body);
     countFrame(c, BEE_FT_RID);
-    // ts 0 (today's firmware): readsbee stamps arrival
+    // Upper case: ts on the Mode S clock (not MLAT-grade, FEED-PROTOCOL.md §5); lower case: ts 0, arrival time
     setTiming(c, 0xEF, ts, clockOf(letter, ts), now);
     struct beeMsg sig = { 0 };
     double level = beeSignal(c, body[6], &sig);
