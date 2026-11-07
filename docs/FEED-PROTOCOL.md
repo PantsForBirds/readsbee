@@ -292,8 +292,9 @@ were −85…−34 dBm, so the strongest drones read 255 (`rid_bt4_power_saturat
 
 **Escaping.** The byte is part of the body, so the existing rule covers it: `0x1a` (+26 dBm,
 impossible in practice) goes out as `1a 1a` (vector `mode_s_dbm_plus26_escaped`). Nothing new:
-the power byte is already `0x1a` for real signals (byte 26 ≈ −66 dBm), so worst-case frame
-lengths don't change.
+worst-case frame lengths already allow an escaped signal byte, so they don't change. (The
+ADSBee's 61-entry power byte table has no `0x1a`: −66 dBm is `0x1b`. So in power byte mode the
+signal byte is never escaped either.)
 
 **Calibration.** The levels are the firmware's existing estimates: an **uncalibrated estimate,
 1 dB resolution** (approved wording, item 11). Levels from one unit and one radio path are
