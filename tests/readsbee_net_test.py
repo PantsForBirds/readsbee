@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """readsbee end to end: runs ./readsb and feeds it over TCP.
-1. UUID filter (policy/example.so), 2. feed protocol v2 frames (UAT S/L/U, ADS-L, Remote ID) with an
+1. UUID filter (policy/example.so), 2. ADSBee Beast extension frames (UAT S/L/U, ADS-L, Remote ID) with an
 upstream connector to a local sink, 3. --readsbee-rid-globe.
 
 usage: tests/readsbee_net_test.py [path/to/readsb] [path/to/policy.so]
@@ -130,7 +130,7 @@ def load(path, wait_for=None, timeout=25):
     return last
 
 
-# ---- v2 frames ---------------------------------------------------------------------------------
+# ---- extension frames ---------------------------------------------------------------------------------
 V2 = "ab0000b2-0000-0000-0000-0000000000b2"  # first half differs from GOOD: filter_uuid uses it
 VDIR = Path(__file__).parent / "vectors"
 
@@ -239,11 +239,11 @@ def v2_frames(adsl_pkts, step):
             out[-1] += proto.enc_uat("u", ts, 90, bytes(552), modes_clock=True)
         if True:
             for k, pkt in enumerate(adsl_pkts(i)):
-                out[-1] += proto.enc_adsl(pkt, ts + i, -87 - k, "ab"[k % 2], repaired=i % 3)
+                out[-1] += proto.enc_adsl(pkt, ts + i, proto.dbm_to_power(-87 - k), "ab"[k % 2], repaired=i % 3)
         if i == 5:
-            out[-1] += proto.enc_rid(odid["pack"], 0, -60, "w", mac_w)
-            out[-1] += proto.enc_rid(odid["location_fast"], 0, -75, "b", mac_b)
-            out[-1] += proto.enc_rid(odid["basic_id_session"], 0, -75, "b", mac_b)
+            out[-1] += proto.enc_rid(odid["pack"], 0, proto.dbm_to_power(-60), "w", mac_w)
+            out[-1] += proto.enc_rid(odid["location_fast"], 0, proto.dbm_to_power(-75), "b", mac_b)
+            out[-1] += proto.enc_rid(odid["basic_id_session"], 0, proto.dbm_to_power(-75), "b", mac_b)
         if i == 7:
             # bad frames: unknown letters, failed bound, unknown type. Only these are lost.
             out[-1] += b"\x1a\xedQ" + esc(bytes(20))
@@ -253,9 +253,9 @@ def v2_frames(adsl_pkts, step):
     return out
 
 
-def test_v2(ip):
-    print("--- v2 frames")
-    tmp = tempfile.mkdtemp(prefix="readsbee-v2-")
+def test_extension_frames(ip):
+    print("--- extension frames")
+    tmp = tempfile.mkdtemp(prefix="readsbee-ext-")
     sdir = os.path.join(tmp, "status")
     # upstream connector to a local sink: must carry Mode S only
     sink = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -306,7 +306,7 @@ def test_v2(ip):
         check("bee001" in h and h["bee001"].get("category") == "B1", "second real ADS-L packet (glider, negative lat)")
         check(not any(x.get("category") == "B6" for x in h.values()), "drones not in aircraft.json by default")
         for i in range(5):  # the other receiver's aircraft needs fresh positions for filter_uuid
-            other.sendall(proto.enc_adsl(adsl_traffic(0, 0x0A0020, 47.5 + i * 0.001, 8.7, 600, 5, 7), 0, -95, "x", modes_clock=False))
+            other.sendall(proto.enc_adsl(adsl_traffic(0, 0x0A0020, 47.5 + i * 0.001, 8.7, 600, 5, 7), 0, proto.dbm_to_power(-95), "x", modes_clock=False))
             time.sleep(0.3)
 
         # API, per receiver
@@ -345,7 +345,7 @@ def test_v2(ip):
         ro = next((r for r in (rb or {}).get("receivers", []) if r.get("uuid") == GOOD), {})
         check(ro.get("frames", {}).get("adsl") == 5 and ro["frames"]["uat"] == 0, f"other receiver: 5 ADS-L (random address, paraglider) {ro.get('frames')}")
         check(r.get("last_timed", {}).get("clock") in ("modes", "not_mlat", "unsynced"), f"timing kept: {r.get('last_timed')}")
-        check(r.get("messages_s", 0) > 0 and r.get("positions", 0) > 0, f"v2 receiver rates: {r.get('messages_s')} msg/s, {r.get('positions')} positions")
+        check(r.get("messages_s", 0) > 0 and r.get("positions", 0) > 0, f"extension frame receiver rates: {r.get('messages_s')} msg/s, {r.get('positions')} positions")
         check(rb and rb["frames"]["adsl"] == 95 and rb["drones"] == 2, "readsbee.json totals")
         st = load(os.path.join(jdir, "stats.json"), lambda x: x.get("total", {}).get("remote", {}).get("readsbee", {}).get("adsl") == 95)
         sr = (st or {}).get("total", {}).get("remote", {}).get("readsbee", {})
@@ -403,7 +403,7 @@ def test_rid_globe(ip):
         s = connect(ip)
         s.sendall(uuid_frame(V2))
         for _ in range(4):  # a drone sends about once a second
-            s.sendall(proto.enc_rid(pack, 0, -60, "w", bytes.fromhex("6a1a2b3c4d5e")))
+            s.sendall(proto.enc_rid(pack, 0, proto.dbm_to_power(-60), "w", bytes.fromhex("6a1a2b3c4d5e")))
             time.sleep(1)
         ac = load(os.path.join(jdir, "aircraft.json"), lambda d: any(a.get("category") == "B6" for a in d.get("aircraft", [])), 10)
         dr = [a for a in (ac or {}).get("aircraft", []) if a.get("category") == "B6"]
@@ -564,7 +564,7 @@ def main():
             if "readsbee" in line:
                 print("  " + line.rstrip())
         shutil.rmtree(tmp)
-    test_v2(ip)
+    test_extension_frames(ip)
     test_rid_globe(ip)
     print(f"{'PASS' if not fails else 'FAIL'}: {fails} failed")
     return 1 if fails else 0

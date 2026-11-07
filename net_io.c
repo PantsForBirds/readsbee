@@ -4537,7 +4537,8 @@ static int decodeBinMessage(struct client *c, char *p, int remote, int64_t now, 
 
 
     ch = *p++; // Grab the signal level
-    mm->signalLevel = beeSignal(c, (unsigned char) ch, &mm->bee); // readsbee: int8 dBm after 'C' with bit 0
+    mm->signalLevel = ((unsigned char) ch / 255.0);
+    mm->signalLevel = mm->signalLevel * mm->signalLevel;
 
     /* In case of Mode-S Beast use the signal level per message for statistics */
     if (c == Modes.serial_client) {
@@ -5066,8 +5067,8 @@ static int decodeEncapsulatedUAT(struct client *c, char *msg, int remote, int64_
         if (*++p != 0x1a)
             return -1;
     }
-    struct beeMsg sig = { 0 }; // readsbee: int8 dBm after 'C' with bit 0
-    double signalLevel = beeSignal(c, (unsigned char) *p, &sig);
+    double signalLevel = ((unsigned char) *p / 255.0);
+    signalLevel = signalLevel * signalLevel;
     p++;
 
     for (int j = 0; j < bytes; j++) {
@@ -5099,16 +5100,13 @@ static int decodeEncapsulatedUAT(struct client *c, char *msg, int remote, int64_
 
     out = safe_snprintf(out, end, ";");
 
-    if (signalLevel > (sig.hasDbm ? 0 : 1.125e-5)) {
+    if (signalLevel > 1.125e-5) {
         out = safe_snprintf(out, end, "rssi=%.1f;", 10.0f * log10f(signalLevel));
     }
 
     //fprintf(stderr, "passing to decodeUatMessage: %s\n", buf);
     beeUatFrame(c, letter, timestamp, now); // readsbee: counts, clock
-    c->bee.uatHasDbm = sig.hasDbm;
-    c->bee.uatDbm = sig.dbm;
     decodeUatMessage(c, buf, 1, now, mb);
-    c->bee.uatHasDbm = 0;
 
     if (p - msg == 0 && debugIncomplete) {
         fprintf(stderr, "uat_incomplete %d\n", __LINE__);
@@ -5154,7 +5152,6 @@ static int decodeUatMessage(struct client *c, char *msg, int remote, int64_t now
                 a->seen = now;
                 return 0;
             }
-            beeUatMessage(c, mm); // readsbee: dBm level
             netUseMessage(mm);
             //displayModesMessage(mm);
         }
@@ -5863,7 +5860,7 @@ static int readBeast(struct client *c, int64_t now, struct messageBuffer *mb) {
             continue;
         } else if (ch >= BEE_EXT_FIRST) {
             if (ch == 0xe5) {
-                // readsbee: capabilities query / confirm, answered on this connection, never forwarded
+                // readsbee: capabilities query, answered on this connection, never forwarded
                 char answer[BEE_CAPS_LEN];
                 int alen;
                 int len = beeCapsFrame(c, p, c->eod, answer, &alen);

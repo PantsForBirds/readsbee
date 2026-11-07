@@ -781,10 +781,9 @@ void beeWriteJson(int64_t now) {
                     (double) c->messageCounter / elapsed, (double) c->positionCounter / elapsed,
                     (uint64_t) c->messageCounter, (uint64_t) c->positionCounter);
             p = beeFramesJson(p, end, c->bee.frames, NULL);
-            if (c->bee.capsState)
-                p = safe_snprintf(p, end, ",\"caps\":{\"offered\":%u,\"active\":%u,\"confirmed\":%s}",
-                        c->bee.capsOffered, c->bee.capsActive,
-                        (c->bee.capsState & BEE_CAPS_CONFIRMED) ? "true" : "false");
+            if (c->bee.capsAnswered)
+                p = safe_snprintf(p, end, ",\"caps\":{\"offered\":%u,\"active\":%u}",
+                        c->bee.capsOffered, c->bee.capsActive);
             if (c->bee.timing.when)
                 p = safe_snprintf(p, end, ",\"last_timed\":{\"type\":\"%02x\",\"clock\":\"%s\",\"epoch\":%u,\"age\":%.1f}",
                         c->bee.timing.type, c->bee.timing.clock == BEE_CLK_MODES ? "modes"

@@ -1,52 +1,34 @@
-# readsbee feed protocol v3.2
+# ADSBee Beast extensions (2026-11-06)
 
 One Mode S Beast TCP stream from an ADSBee to readsbee, carrying Mode S, UAT, ADS-L and Remote
-ID. Status: **approved by the admin 2026-11-06** with all eleven recommendations in §11 (item 11:
-levels are an "uncalibrated estimate, 1 dB resolution", no ± figure). readsbee implements the
+ID. Status: **approved by the admin 2026-11-06** with all eleven recommendations in §11; items 8,
+9 and 11 (dBm levels, the confirm frame) were withdrawn on 2026-11-07, see History. readsbee implements the
 server side (`readsbee_ext.c`, README-readsbee.md). Servers may accept or refuse feeds by policy;
 this spec doesn't cover that.
 
-**v3.2 changes from v3.1** (admin, 2026-11-06: "query for the dBm capability, and if it doesn't
-exist, feed all protocols in dBFS instead of dBm"; the conversion must be a lookup table):
-- **Bit 0 now decides the signal byte of every frame type, `0xED` and `0xEF` included.** Bit 0
-  confirmed: int8 dBm (`0x80` = no level). Otherwise: the Beast power byte (0 = no level).
-  `0xED`/`0xEF` lose v2's fixed "always dBm" rule (§2, §4, §5). In power-byte mode they also
-  get the −100 dBm floor and the −40 dBm ceiling: ADS-L below −100 dBm reads 1, Remote ID
-  above −40 dBm reads 255.
-- **Performance stated (§7.6):** the firmware's dBm → power byte is a 61-entry table (one clamp,
-  one array read per frame, no math at runtime); dBm is a clamp and a cast. readsbee's power byte
-  → level is one divide and one multiply today; its dBm path uses a 256-entry table built once.
-- **Bit order (admin): the dBm capability is bit 0, the protocols follow:** bit 1 `0xED`
-  ADS-L, bit 2 `0xEF` Remote ID, bit 3 upper-case UAT (v3.1 had ADS-L 0, Remote ID 1, UAT 2,
-  dBm 3). All four bits is still `8F`. Bits 1–3 without dBm is `8E` (was `87`). Every
-  query/answer/confirm vector changed accordingly.
-- Vectors: power-byte variants of `0xED`/`0xEF` added. v2's single `0xED`/`0xEF` vectors keep
-  their bytes and decoding, now tagged `signal_mode: dbm` (= after `C` with bit 0).
-  `mixed_stream` keeps its bytes; its `0xED`/`0xEF` frames now decode as power bytes (no `C`).
-
-**v3.1 changes from v3** (admin, 2026-11-06: "convert all packet power levels to signed dBm if
-the server accepts this spec"):
-- Capability **bit 0 = signal level in dBm** (bit 3 in v3.1; moved to bit 0 in v3.2). When both sides set it, the signal byte of
-  `0x31`/`0x32`/`0x33` and UAT `0xEC` is **signed int8 dBm** (`0x80` = no level), like `0xED`/`0xEF`
-  already are. Without it, nothing changes (§7.6).
-- New **confirm frame `1a E5 'C' ver f0 f1`** (feeder → server, once, after the answer): the bits
-  in effect from the next frame on. Needed because frames already in flight when the answer is
-  sent still carry the power byte; readsbee switches at `C`, not at its answer (§7.1, §7.2).
-- Stock servers: unchanged (they never answer, so they never get `C` or dBm). Not re-measured,
-  except the feeder model (§10.3).
-
-**v3 changes from v2** (admin, 2026-11-06, after reviewing PR #427): no READSBEE feed protocol.
-Every TCP feed stays plain `BEAST` and starts with a 6-byte capabilities query (`0xE5 'Q'`, §7).
-A server that answers (`0xE5 'A'`, readsbee) gets the v2 frames it accepts; any other server
-gets today's Beast stream plus those 6 bytes. v2's frame definitions (§1–§6) are unchanged.
-
-v2 changes from v1.2: one Beast type per encapsulation in the ADSBee UAT style, no `0xEE`
-umbrella, no text in the feed (hello and `0xE9` dropped), no proof frame.
+**History.** Agreed with the admin on 2026-11-06 after several drafts (the drafts are in git
+history; this document has no version number). Rules that came out of the review:
+- No `READSBEE` feed protocol: every TCP feed stays plain `BEAST` and starts with a 6-byte
+  capabilities query (`0xE5 'Q'`, §7). A server that answers (`0xE5 'A'`, readsbee) gets the
+  extension frames it accepts; any other server gets today's Beast stream plus those 6 bytes.
+- **The signal byte of every frame type is the Beast power byte** (0 = no level), `0xED` and
+  `0xEF` included, with its −100 dBm floor and −40 dBm ceiling: ADS-L below −100 dBm reads 1,
+  Remote ID above −40 dBm reads 255 (§2).
+- Bit 0 is reserved; the protocols are bits 1–3: bit 1 `0xED` ADS-L, bit 2 `0xEF` Remote ID,
+  bit 3 upper-case UAT. All three is `8E`.
+- The feeder sends the agreed frames (query bits AND answer bits) as soon as it has read the
+  answer. Every frame says what it is, so frames in flight can't be misread and there is no
+  switch point (§7.1).
+- One Beast type per encapsulation in the ADSBee UAT style, no `0xEE` umbrella, no text in the
+  feed, no proof frame.
+- **2026-11-07 (admin): dBm signal levels and the confirm frame `C` removed.** Every signal byte
+  is the power byte; capability bit 0 and the letter `C` are reserved, bits 1–3 keep their place.
 
 Reference code: [`tests/readsbee_proto.py`](../tests/readsbee_proto.py) (`python3 tests/readsbee_proto.py` → `vectors ok`, checks
-[`tests/vectors/feed_vectors.json`](../tests/vectors/feed_vectors.json); vectors 1–15 are v2's, 16–28 v3's, 29–51 v3.1's, 52–60 v3.2's; see the v3.2 notes for the
-`0xED`/`0xEF` ones). Stock-server measurements (§10: `test_caps_stock.py`, `results/`, v1.2 `results.txt`, v2
-`results-uat-msgtype.txt`) were made outside this repo and aren't included.
+[`tests/vectors/feed_vectors.json`](../tests/vectors/feed_vectors.json): 43 vectors; the `stream_query_answer*` vectors carry
+both directions in `exchange`: query, answer, then the agreed frames). Stock-server measurements (§10:
+`test_caps_stock.py`, `results/`, `results.txt`, `results-uat-msgtype.txt`) were made outside this
+repo and aren't included.
 
 ## 1. Frame types
 
@@ -55,17 +37,17 @@ Reference code: [`tests/readsbee_proto.py`](../tests/readsbee_proto.py) (`python
 | `0x32` / `0x33` | Mode S short / long | ts6 rssi1 + 7 / 14 | Beast |
 | `0xE3` | readsb receiver ID | 8 | readsb |
 | `0xE4` | readsb feed UUID | 36 ASCII | readsb |
-| **`0xE5`** | **capabilities** | letter `Q` / `A` / `C`, ver1 bits2 (never `0x1a`) | new in v3 (§7); `C` new in v3.1 |
+| **`0xE5`** | **capabilities** | letter `Q` / `A` (`C` reserved), ver1 bits2 (never `0x1a`) | new (§7) |
 | `0xEC` | UAT | letter `s l u` / **`S L U`**, ts6 rssi1 + 30 / 48 / 552 | ADSBee + readsb; upper case new |
 | **`0xED`** | **ADS-L** | letter `A B X`, ts6 sig1 rep1 + on-air (1 + L) | new |
 | **`0xEF`** | **Remote ID** | letter `B C E W N`, ts6 sig1 mac6 + ODID (25 or 3 + 25n) | new |
 
-**Why these codes.** Re-checked free in readsb dev (`bf8f8fd`; again for v3 at `e576cba`,
+**Why these codes.** Re-checked free in readsb dev (`bf8f8fd`; again for the capabilities check at `e576cba`,
 2026-11-06), dump1090-fa, mlat-client, mlat-server, beast-splitter and ADSBee firmware (main,
-`ads-l`, `t0948-*`): `E1 E2 E5–E7 EA ED EF–FF`. v3 takes `0xE5`: next to `0xE4`, the other
+`ads-l`, `t0948-*`): `E1 E2 E5–E7 EA ED EF–FF`. The capabilities check takes `0xE5`: next to `0xE4`, the other
 connection-start frame.
 - `0xED` sits next to UAT `0xEC`: both are CC13xx sub-GHz packets with the same timestamp path.
-- `0xEF` for Remote ID. `0xEE` is skipped on purpose: v1.x drafts used it with a different
+- `0xEF` for Remote ID. `0xEE` is skipped on purpose: early drafts used it with a different
   layout, and test captures may exist.
 - FANET / OGN: nothing reserved. They'd take one free code each (`E5`–`E7`, `F0`+) with the
   same shape, and a decoder doesn't need to know them in advance (§3).
@@ -76,17 +58,20 @@ connection-start frame.
 - Every `0x1a` in the body is sent as `1a 1a`. The type byte and the letter are never escaped and
   are never `0x1a`: letters are ASCII.
 - Integers big-endian. ts6 is 6 bytes.
-- **Signal byte sig1 (v3.2)**, the same rule on every frame type (`0x31`–`0x33`, `0xEC`, `0xED`,
-  `0xEF`), decided once per connection by bit 0 (§7.6):
-  - **Bit 0 confirmed** (after `C`): **int8 dBm**, −127…+127, **`0x80` (−128) = no level**.
-  - **Otherwise** (stock servers, before `C`, readsbee without bit 0): the **Beast power
-    byte**, amplitude, round(255 × 10^(dBFS/20)) with dBFS = 0.75 × (dBm + 40): 255 at −40 dBm
-    and above, 1 at −100 dBm and below, **0 = no level** (firmware `WriteRSSIdBmAsBeastPowerLevel`).
-  - v2/v3.1 had `0xED`/`0xEF` always in dBm. v3.2 drops that: ADS-L (decodes to about
-    −108 dBm) reads 1 below −100 dBm in power-byte mode, and Remote ID above −40 dBm reads 255.
+- **Signal byte sig1**, the same on every frame type (`0x31`–`0x33`, `0xEC`, `0xED`, `0xEF`): the
+  **Beast power byte**, amplitude, round(255 × 10^(dBFS/20)) with dBFS = 0.75 × (dBm + 40): 255 at
+  −40 dBm and above, 1 at −100 dBm and below, **0 = no level** (firmware
+  `WriteRSSIdBmAsBeastPowerLevel`: one clamp and one read of the 61-entry `kRSSIdBmToRSSIdBFS`
+  table in `beast_tables.hh`, no floating point at runtime). There is no dBm mode.
+  - ADS-L decodes down to about −108 dBm, so everything at or below −100 dBm reads 1 (vector
+    `adsl_868_2_power_floor`). In the t1069 capture Remote ID levels were −85…−34 dBm, so the
+    strongest drones read 255 (`rid_bt4_power_saturated`).
+  - The table has no `0x1a` (−66 dBm is `0x1b`), so the signal byte is never escaped; a decoder
+    unescapes it like any body byte anyway. readsbee turns it into a level as readsb does,
+    `(b / 255)²`.
 - **Letter case = clock.** Upper case: ts6 is on this connection's Mode S clock (the 12 MHz
-  counter of its `0x32`/`0x33` frames), MLAT-grade; **ts6 = 0 means not synced yet** (about 2–3 s
-  after boot, maybe after a `SUBG_MODE` switch). Lower case: ts6 isn't on the Mode S clock;
+  counter of its `0x32`/`0x33` frames), MLAT-grade (Remote ID: same clock, coarser, §5);
+  **ts6 = 0 means not synced yet** (about 2–3 s after boot, maybe after a `SUBG_MODE` switch). Lower case: ts6 isn't on the Mode S clock;
   never use it for MLAT.
 - Every payload bounds itself, so there is no LEN byte (§3).
 - Largest frames, escaped worst case: UAT `U` 1 + 2 + 2 × 559 = 1121 (unchanged), Remote ID
@@ -108,7 +93,7 @@ this way (t-1061).
 ## 4. ADS-L `0xED`
 
 ```
-1a ED  A|B|X  ts6  sig1  rep1  L  onair[L]        sig1: dBm or power byte, by bit 0 (§2)
+1a ED  A|B|X  ts6  sig1  rep1  L  onair[L]        sig1: power byte (§2)
 ```
 
 - **Letter = channel**: `A` 868.2 MHz, `B` 868.4 MHz, `X` unknown. Lower case `a b x` is
@@ -125,7 +110,7 @@ this way (t-1061).
 ## 5. Remote ID `0xEF`
 
 ```
-1a EF  B|C|E|W|N (b|c|e|w|n)  ts6  sig1  mac6  odid[25 | 3+25n]    sig1: by bit 0 (§2)
+1a EF  B|C|E|W|N (b|c|e|w|n)  ts6  sig1  mac6  odid[25 | 3+25n]    sig1: power byte (§2)
 ```
 
 - **Letter = transport**: `B` BT4 legacy, `C` BT5 Coded (long range), `E` BT5 extended 1M,
@@ -133,9 +118,14 @@ this way (t-1061).
 - **mac6**: source address in display order (BLE AdvA, Wi-Fi SA). Needed: BLE legacy carries one
   ODID message per packet, and the address is what ties a drone's Basic ID to its Location.
 - **odid**: one ASTM F3411 25-byte message, or a message pack, as received.
-- **Timestamp.** The ESP32 only has ms time, not the Mode S clock. Send lower case with
-  **ts6 = 0**: readsbee stamps arrival time, which is good enough for Remote ID (no MLAT). Upper
-  case is kept for a later firmware that can time Remote ID on the Mode S clock.
+- **Timestamp.** When the ESP32 is synced to the Mode S clock (adsbee #428, shared SYNC pulse):
+  **upper case**, ts6 = the packet's time on this connection's Mode S 12 MHz clock (the 48 MHz
+  MLAT counter / 4, low 48 bits, wrapping like the Mode S frames'). Wi-Fi beacons use the MAC's
+  receive timestamp (about 2–4 µs); BLE has none, so it's the callback time (about 1 ms after the
+  air time). It orders Remote ID against Mode S but is **not MLAT-grade**. Not synced
+  yet: **lower case with ts6 = 0**, and readsbee stamps arrival time. The firmware doesn't send
+  upper case with ts6 = 0 for Remote ID. Vectors `rid_bt4_modes_clock_power`,
+  `rid_wifi_beacon_pack_modes_clock`, `rid_bt4_modes_clock_wrap_power`.
 - Left out (minimal): BLE address type (public / random; collisions between drones are
   negligible), channel, ODID counter (dedupe only, firmware drops it today), CRC/version.
 
@@ -159,11 +149,10 @@ and old firmware (lower case) is never trusted. Same payloads, so the decode is 
   pass. Without `--net-ingest`, nothing is closed.
 - So upper-case UAT, like `0xED`/`0xEF`, only goes out after the server accepted it (§7).
 
-## 7. Capabilities check (new in v3; replaces v2's READSBEE opt-in)
+## 7. Capabilities check (replaces the READSBEE opt-in)
 
 Every ADSBee **TCP** Beast feed (`BEAST`, `BEAST_NO_UAT`, `BEAST_NO_UAT_UPLINK`) asks the server
-once per connection what it accepts. Only an answer turns on `0xED`, `0xEF`, upper-case UAT and
-(v3.1) dBm signal levels.
+once per connection what it accepts. Only an answer turns on `0xED`, `0xEF` and upper-case UAT.
 No answer = today's Beast. UDP feeds, MQTT and USB/serial Beast never query (no back channel)
 and stay plain. The `READSBEE` value of `AT+FEED` goes away; #427 is reworked after approval.
 
@@ -172,21 +161,25 @@ and stay plain. The `READSBEE` value of `AT+FEED` goes away; #427 is reworked af
 ```
 query   feeder -> server   1a E5 'Q' ver f0 f1      6 bytes, sent once, right after 0xE4
 answer  server -> feeder   1a E5 'A' ver f0 f1      6 bytes, sent once, only in reply to a query
-confirm feeder -> server   1a E5 'C' ver f0 f1      6 bytes, sent once, after the answer (v3.1):
-                                                    the bits in effect from the next frame on
-        ver = 0x80 | version (1 -> 0x81)
+        letter 'C' reserved (was the confirm frame): never sent; a server skips it as one
+              6-byte frame, no garbage
+        ver = 0x80 | version (1 -> 0x81): a protocol field of the 0xE5 frame, not a
+              version of this document
         f0  = 0x80 | feature bits 0-6,   f1 = 0x80 | feature bits 7-13
 ```
 
 | bit | Feature | In the query (feeder can send) | In the answer (server accepts) |
 |---|---|---|---|
-| **0** | **signal level in dBm** (v3.1; first bit since v3.2) | always (every ADSBee path has dBm) | reads the signal byte of **every** frame (`0x31`–`0x33`, `0xEC`, `0xED`, `0xEF`) as int8 dBm after `C`; without it, all are power bytes |
+| 0 | reserved: **never set, ignored** (was dBm signal levels, removed 2026-11-07; bits 1–3 kept their place, nothing renumbered) | 0 | 0; ignored by the feeder if set (readsbee before 2026-11-07 answered `8F`) |
 | 1 | `0xED` ADS-L | sub-GHz radio in ADS-L mode with #409 clock | decodes `0xED` |
 | 2 | `0xEF` Remote ID | Remote ID receive on | decodes `0xEF` |
 | 3 | `0xEC` upper-case `S L U` | firmware with #409 clock fix | trusts / accepts `S L U` |
 | 4–13 | reserved | 0 | 0; ignored by the feeder |
 
-- After an answer the feeder sends **query bits AND answer bits** (known bits only). An answer of
+- After an answer the feeder sends **query bits AND answer bits** (known bits only, so never bit 0),
+  **from the moment it has read the answer**, with no confirm frame. Frames in flight need no
+  switch point: `0xED`, `0xEF` and `S L U` say what they are, readsbee decodes them from any feed
+  (§11 item 6), and the signal byte means the same before and after. An answer of
   `81 80 80` (nothing) is valid: plain Beast. A newer version may add bits; each side uses what
   it knows. A higher `ver` doesn't change the frame size.
 - **Never contains `0x1a`, never escaped:** the letter is ASCII, every other byte has the high
@@ -196,25 +189,17 @@ confirm feeder -> server   1a E5 'C' ver f0 f1      6 bytes, sent once, after th
   `0x31`–`0x35`, readsb commands `P` `W` (and `1` in its output-port reader); `E5` is none of these.
   `Q`/`A` keeps one code for both directions and tells an answer from a reflected query.
 - One query per connection. A server answers the first query only; later ones are ignored.
-- **Confirm (v3.1):** right after it reads the answer, before its next frame, the feeder sends
-  `C` with query bits AND answer bits (also when that is 0). It's the only switch point: frames
-  before `C` use today's encoding (power byte, `s l u`, no `0xED`/`0xEF`), frames after it use
-  the confirmed bits. Bits 1–3 are visible in the frames themselves; bit 0 isn't (the same byte
-  means something else), so readsbee must switch on `C`, never on the time it answered or on
-  the values. Only one `C` per connection; it never reaches a stock server (they never answer).
 
 ### 7.2 Sequence
 
 ```
 ADSBee (feeder)                                        server
    | TCP connect                                          |
-   |-- 1a E4 <uuid 36>  1a E5 Q 81 8F 80 --------------->|  one send(): E4, then the query
+   |-- 1a E4 <uuid 36>  1a E5 Q 81 8E 80 --------------->|  one send(): E4, then the query
    |-- Beast as today (0x32/0x33, UAT s l u) ----------->|
    |                                                      |  readsbee: replies at once
-   |<----------------------------- 1a E5 A 81 8F 80 -----|  stock readsb: skips 6 bytes, no reply
-   |-- (frames already in flight: power byte) ---------->|
-   |-- 1a E5 C 81 8F 80 -------------------------------->|  switch point (v3.1)
-   |-- + 0xED, 0xEF, UAT S L U, dBm levels (agreed bits)>|
+   |<----------------------------- 1a E5 A 81 8E 80 -----|  stock readsb: skips 6 bytes, no reply
+   |-- + 0xED, 0xEF, UAT S L U (agreed bits) ----------->|  from the moment A is read
    |                                                      |
    no answer within 5 s: plain Beast until this connection closes
 ```
@@ -255,129 +240,22 @@ so pings can't fill the receive window.
   scanner (1 state byte + 4 bytes). In `IPWANTask`, for each connected TCP feed:
   `recv(sock, buf, 64, MSG_DONTWAIT)` until `EAGAIN`, feed the scanner while waiting, drop the
   bytes otherwise; after 5 s without an answer → plain.
-- Reporting: `0xED` only if bit 1, `0xEF` only if bit 2, UAT letter upper case only if bit 3,
-  dBm signal byte only if bit 0 (§7.6). The `NO_UAT` variants still decide whether UAT goes out.
-- On the answer: queue `C` into that feed's send buffer before its next frame, then move the
-  feed to its new reporting group. The per-feed send buffer is FIFO, so the order holds even
-  with a backlog.
+- Reporting: `0xED` only if bit 1, `0xEF` only if bit 2, UAT letter upper case only if bit 3.
+  The `NO_UAT` variants still decide whether UAT goes out. The signal byte is the power byte on
+  every feed, so feeds are grouped by protocol and bit 3 only.
+- On the answer: the feed's bits become query AND answer, in effect for the next frame.
 
 ### 7.5 readsbee side
 
 - `readBeast`: new branch for `0xE5`: wait for 4 bytes; if valid `Q` and first on this
-  connection, store the offered bits, queue `1a E5 A 81 <accept>` and flush. No garbage counted
-  for a valid frame. `C` (v3.1): store `c->caps_active = bits & accept`, once; from the next frame
-  on, read the signal byte as dBm if bit 0 is set. `A` from a client, a second `C`, or a
-  malformed frame: skip like an unknown type.
-- `accept` = all known bits by default (option to narrow it per server, e.g. Remote ID only).
-- Input is still treated the same for every feed (v2 rule): extension frames from a feed that
+  connection, store the offered bits and `offered AND accept` (shown in readsbee.json), queue
+  `1a E5 A 81 <accept>` and flush. No garbage counted for a valid frame. `A` from a client, a
+  second `Q`, the reserved `C`: skipped as one 6-byte frame. Malformed: skip like an unknown type.
+- `accept` = bits 1–3 by default (`--readsbee-caps` narrows it, e.g. 4 = Remote ID only; bit 0
+  is never answered).
+- Input is still treated the same for every feed : extension frames from a feed that
   didn't query are decoded anyway. The answer only steers what an ADSBee sends.
 - `0xE5` is never forwarded (outputs are rebuilt from decoded messages, §8).
-
-### 7.6 Signal level: dBm or power byte (bit 0; v3.1, all frame types since v3.2)
-
-**Encoding.** After `C` with bit 0, the signal byte of **every** frame (`0x31`/`0x32`/`0x33`,
-`0xEC` all letters, `0xED`, `0xEF`) is signed int8 dBm: `round(sigs_dbm)` clamped to −127…+127,
-**`0x80` (−128) = no level** (firmware `INT16_MIN`). Without bit 0 (stock servers, before `C`, a
-readsbee that didn't accept it) every one of them, `0xED`/`0xEF` included, carries the Beast power
-byte, **0 = no level**. Same position, same frame lengths; only the byte's meaning changes.
-ADSBee levels are about −110…0 dBm in practice.
-
-| Mode | Mode S, UAT | ADS-L `0xED` | Remote ID `0xEF` | No level |
-|---|---|---|---|---|
-| bit 0 confirmed | int8 dBm | int8 dBm | int8 dBm | `0x80` |
-| otherwise | power byte | **power byte** (new in v3.2) | **power byte** (new in v3.2) | `0` (firmware sends 1 today, §11 item 10) |
-
-Power-byte limits for the new frames: ADS-L decodes down to about −108 dBm, so everything at or
-below −100 dBm reads 1 (vector `adsl_868_2_power_floor`). In the t1069 capture, Remote ID levels
-were −85…−34 dBm, so the strongest drones read 255 (`rid_bt4_power_saturated`).
-
-**Performance (admin requirement: lookup table).**
-- **Firmware, power byte (today, unchanged):** `WriteRSSIdBmAsBeastPowerLevel`
-  (`beast_utils.cpp:93`) clamps `sigs_dbm` to −100…−40 and reads `kRSSIdBmToRSSIdBFS[61]`
-  (uint8, `beast_tables.hh`, generated offline by `generate_beast_tables.py`). That's one clamp
-  and one array read per frame, no floating point or `pow`/`log` at runtime, on the RP2040 and the
-  ESP32. v3.2 reuses it as is for `0xED`/`0xEF` in power-byte mode.
-- **Firmware, dBm:** a clamp to −127…+127 and a cast (`INT16_MIN` → `0x80`). Cheaper than the table.
-- **readsbee, power byte → level:** `(b / 255)²`, one divide and one multiply
-  (`net_io.c:4540-4541`, `:5063-5065`); no `pow`, nothing to change. It could be a 256-entry table
-  too, but there's nothing to gain.
-- **readsbee, dBm → level:** `10^(0.075 × (d + 40))` would be a `pow` per frame, so readsbee builds
-  a **256-entry `double` table once at startup**, indexed by the raw byte (`0x80` → 0, capped at
-  1.0). Per frame that's one array read, the same cost as today. Reference:
-  `signal_level_from_dbm` in `readsbee_proto.py`.
-- **Output** (unchanged): readsb rebuilds the power byte with `sqrt` per output frame
-  (`:1813`) and clamps it to 1…255 (`:1814-1817`).
-
-**Escaping.** The byte is part of the body, so the existing rule covers it: `0x1a` (+26 dBm,
-impossible in practice) goes out as `1a 1a` (vector `mode_s_dbm_plus26_escaped`). Nothing new:
-the power byte is already `0x1a` for real signals (byte 26 ≈ −66 dBm), so worst-case frame
-lengths don't change.
-
-**Calibration.** The levels are the firmware's existing estimates: an **uncalibrated estimate,
-1 dB resolution** (approved wording, item 11). Levels from one unit and one radio path are
-comparable with each other; across units, or across radio paths (1090 MHz Mode S, the sub-GHz
-UAT/ADS-L radio, BLE/Wi-Fi Remote ID), they are separate estimates. dBm doesn't make levels more
-accurate. It stops the firmware from throwing away resolution and range.
-
-**Conversion.** Firmware table (`beast_tables.hh`, from `generate_beast_tables.py`): 0.75 dBFS
-per dB, 0 dBFS at −40 dBm.
-
-```
-power byte from dBm (today):  d' = clamp(d, -100, -40);  dBFS = 0.75 * (d' + 40)
-                              b  = round(255 * 10^(dBFS / 20))       (255 at -40, 1 at -100)
-dBm from power byte:          d  = -40 + 20 * log10(b / 255) / 0.75  (b >= 1; 0 = no level)
-                              b = 255 means "-40 dBm or stronger", b = 1 "about -100 or weaker"
-readsbee, dBm byte -> power:  signalLevel = min(1, 10^(0.075 * (d + 40)))   (0x80 -> 0)
-```
-
-`readsbee_proto.py`: `dbm_to_power`, `power_to_dbm`, `dbm_byte`, `signal_level_from_dbm`.
-`FW_POWER_TABLE` matches `beast_tables.hh` exactly.
-
-| | Power byte (today) | dBm (bit 0) |
-|---|---|---|
-| Range | −100 … −40 dBm; all stronger signals read 255 | −127 … +127 dBm |
-| Steps | 61 dBm values map to only 47 distinct bytes. Bytes 1–2 cover −100…−94 (byte 2 alone spans 6 dB), so the round trip is off by up to 4 dB near the floor | 1 dB everywhere |
-| No level | firmware sends **1** (`INT16_MIN` clamps to the first table entry); Beast convention is 0 | `0x80` |
-
-**Where a dBm-mode feed's frames go (readsbee `8fe0e98`).** readsbee turns the byte into
-`mm->signalLevel` (power, 0…1) in exactly two places, and everything else reads that value:
-
-| Place | Code | v3.1 |
-|---|---|---|
-| Mode S input | `net_io.c:4540-4550` `decodeBinMessage` | if the connection confirmed bit 0: the 256-entry dBm table, else today's `(b/255)²` |
-| UAT `0xEC` input | `net_io.c:5063-5098` `decodeEncapsulatedUAT` | same |
-| `0xED` / `0xEF` input (readsbee phase 2, not written yet) | new | same rule: power byte unless bit 0 was confirmed (v3.2) |
-| Beast outputs (`beast_out`, `beast_reduce_out`, `beast_reduce_plus_out`, garbage out) | `:1772`, `:1813` `sig = sqrt(signalLevel) * 255` | unchanged: always a standard power byte (clamped to 255 at `:1816`). The 1.0 cap on the dBm table keeps JSON/stats at ≤ 0 dBFS, as with power-byte feeds |
-| `--write-binary` / dump | `:2135` | unchanged (power byte) |
-| SBS field 23, aircraft JSON `rssi`, stats peak / strong (> −3 dBFS = −36 dBm), track | `:3910`, `json_out.c:973`, `stats.c:106,537,881`, `track.c:864` | unchanged dBFS. Mixed feeds stay comparable: a dBm feed gives the same dBFS as the power byte would have, just unrounded |
-
-- **mlat:** mlat-client reads readsbee's rebuilt Beast output (power byte). mlat-server never
-  sees the feed. Unaffected.
-- **readsbee-to-readsbee relay (§8, later):** the relaying readsbee is the feeder on that link and
-  runs its own capabilities check. It sends dBm only if that link confirmed bit 0, and rebuilt
-  power bytes otherwise. Rule: **a dBm byte only crosses a connection whose two ends confirmed
-  bit 0.** The same applies to `0xE3`-prefixed frames.
-- **Conversion is by connection:** readsbee keeps the confirmed bits on the client and never
-  guesses from values (−87 dBm = `0xa9` = power byte 169 is a valid level both ways).
-- To expose the gain, readsbee can store `mm->sig_dbm` and add a new JSON field (e.g. `dbm`)
-  next to `rssi` (open question 9).
-
-**Firmware cost.**
-- The value exists on every path: Mode S `packet.raw.sigs_dbm` (`RawModeSPacket`,
-  `mode_s_packet.hh:64`), UAT ADS-B and uplink `sigs_dbm` (`uat_packet.hh:70`, `:386`). All are
-  `int16` with `INT16_MIN` = no level. ADS-L and Remote ID have dBm too.
-- Writer: a `WriteRSSIdBmAsInt8` next to `WriteRSSIdBmAsBeastPowerLevel` (`beast_utils.cpp:93`):
-  clamp, `INT16_MIN` → `0x80`, `WriteBufferWithBeastEscapes`. The three builders
-  (`BuildModeSBeastFrame`, `BuildUATADSBBeastFrame`, `BuildUATUplinkBeastFrame`) and #427's
-  `0xED`/`0xEF` builders take a signal-mode argument that defaults to power, so the RP2040's
-  USB/serial Beast and stock feeds don't change. (#427 writes dBm for `0xED`/`0xEF` today; in
-  v3.2 they call `WriteRSSIdBmAsBeastPowerLevel` unless bit 0 was confirmed.)
-- **Per-connection switch:** `ReportBeast` builds one batch per protocol and sends it to every
-  sink of that protocol (`comms_reporting.cpp:239-252`, `:487-547`). Feeds must be grouped by
-  (protocol, confirmed bits 0 and 3): usually 2 groups (stock servers, readsbee), at most 4 per
-  protocol. That's one more batch build per reporting tick when both kinds are connected (a
-  Mode S frame is about 26 bytes). No extra RAM: the scratch batch buffer is reused. This is the
-  group #427 already adds for READSBEE feeds.
 
 ## 8. Forwarding
 
@@ -394,7 +272,7 @@ readsbee, dBm byte -> power:  signalLevel = min(1, 10^(0.075 * (d + 40)))   (0x8
 | 1 | Channel in the letter; erasure count needs a home | Letter `A`/`B`/`X`; rep1 byte before L |
 | 2 | ts6 = 0 = not synced | Kept for every upper-case frame (§2) |
 | 3 | UAT clock marker in the frame | Upper-case `S L U` (§6), only after the server accepted it (§7): stock readsb closes ingest feeds on them |
-| 4 | Per-feed READSBEE setting | **Replaced in v3** by the capabilities check (§7); the setting goes away |
+| 4 | Per-feed READSBEE setting | **Replaced** by the capabilities check (§7); the setting goes away |
 
 ## 10. Stock servers and the query
 
@@ -468,23 +346,17 @@ it doesn't know `0xEC` and counts a UAT uplink as garbage. That's today's behavi
 arrives, and good frames in that read take 128 each off first. Not something to rely on: the
 burst row is the real limit (85 × 6 = 510).
 
-The stock-server runs above used v3's query bytes `1a e5 51 81 87 80`. A v3.2 feeder sends
-`1a e5 51 81 8f 80`: same length, every byte after the letter still ≥ `0x80`, so the same garbage
+The stock-server runs above used an earlier draft's query bytes `1a e5 51 81 87 80`. The feeder sends
+`1a e5 51 81 8e 80`: same length, every byte after the letter still ≥ `0x80`, so the same garbage
 cost (6) applies.
 
-**v3.2 feeder model** (re-run 2026-11-06, `results/results.json` `feeder`): ADS-L and Remote ID now
-follow bit 0 as well. With a v3 server (bits 1–3), all 18,398 frames, `0xED`/`0xEF` included,
-went out with power bytes. With bits 0–3: 0 levels misread before or after `C`.
+**Feeder model, power bytes and no confirm** (re-run 2026-11-07, `tests/readsbee_caps_test.py`
+against readsbee): the feeder sends the agreed frames from the moment it reads the answer. Answer
+seen at once or after 1 s: bits 1–3 agreed, every Mode S power byte came back unchanged in
+readsbee's Beast output, the drones' rssi matched their power byte. Answer seen after 6 s: plain.
+Server answering 4: Remote ID only, no ADS-L, lower-case UAT. No connection closed.
 
-**v3.1 feeder model** (re-run 2026-11-06, `results/results.json` `feeder`): the feeder offers
-bits 0–3, re-encodes the captured levels as dBm after `C`, and the simulated readsbee decodes by
-connection. Answer after 12 ms or 1 s: 0 levels misread. With the 1 s delay, frames sent after
-the answer still arrived with power bytes before `C` (in-flight), which is why `C` exists. A v3
-server (no bit 0): the feeder keeps power bytes. Answer after 6 s: plain. Stock readsb ingest:
-plain, no close. The stock-server runs weren't repeated: stock servers never answer, so they
-never see `C` or dBm.
-
-v3 feeder model against a simulated readsbee (`t_feeder`): answer after 12 ms or 1 s → extensions
+Feeder model, capabilities check only, against a simulated readsbee (`t_feeder`): answer after 12 ms or 1 s → extensions
 on, `0xED`/`0xEF`/`S` only after the answer; answer after 6 s → ignored, plain Beast until the
 connection closes; stock readsb ingest → plain after the timeout, no close, Mode S intact.
 
@@ -504,25 +376,18 @@ and the counter is per connection, so reconnects never add up.
    connect; buffering would need RAM the non-PSRAM units don't have.
 5. **A per-feed switch to turn the query off?** Recommended: no for now. Measured harmless on
    every server type; add one only if a server is ever found that objects.
-6. **readsbee: decode extension frames from feeds that didn't query?** Recommended: yes (v2
-   rule; costs nothing and keeps other feeders working).
+6. **readsbee: decode extension frames from feeds that didn't query?** Recommended: yes (costs nothing and keeps other feeders working).
 7. **Upper-case UAT behind bit 3 rather than always?** Recommended: behind bit 3. Stock readsb
    ingest closes on `S L U` (§6).
 
-v3.1:
+Added with the dBm capability (withdrawn 2026-11-07, kept for the numbering):
 
-8. **Confirm frame `C` as the switch point?** Recommended: yes. Without it readsbee would have
-   to switch when it answers, and misread the frames already in flight (one round trip of
-   traffic; seen in the feeder model). Alternative: no `C`, and dBm on its own new type codes
-   (costs 3–4 more codes and doubles the decoders).
-9. **readsbee JSON:** keep `rssi` as dBFS and add a new `dbm` field? Recommended: yes. tar1090 and
-   aggregator tools expect dBFS ≤ 0. Alternative: switch `rssi` to dBm for dBm feeds (breaks
-   them).
-10. **Power byte for "no level"** (now on `0xED`/`0xEF` too in power-byte mode): the firmware sends 1 today (`INT16_MIN` clamps to the first
-    table entry). Fix it to 0 separately? Recommended: yes, as its own small firmware fix. It's
-    not part of this spec's switch.
-11. **Calibration wording:** "uncalibrated, ±2.5 dB absolute, 1 dB resolution". Please confirm
-    the ±2.5 dB figure; I couldn't find it in the repos or the library.
+8. ~~Confirm frame `C` as the switch point?~~ Withdrawn 2026-11-07: it only existed to switch
+   the signal byte to dBm. The letter stays reserved.
+9. ~~readsbee JSON `dbm` field?~~ Withdrawn 2026-11-07 with dBm: `rssi` stays dBFS, no `dbm`.
+10. **Power byte for "no level"** (on `0xED`/`0xEF` too): the firmware sent 1 (`INT16_MIN`
+    clamped to the first table entry). Fix it to 0? Recommended: yes; done in #427.
+11. ~~Calibration wording for dBm levels~~ Withdrawn 2026-11-07 with dBm.
 
-Still open from v2: Remote ID ts6 (keep 0, recommended); readsbee phase 2 scope (`S L U`,
+Still open: readsbee phase 2 scope (`S L U`,
 `0xED`, `0xEF`, now plus the `0xE5` answer); sub-GHz clock jitter (t-1056); BLE address type.

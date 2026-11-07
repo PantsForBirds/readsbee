@@ -1,7 +1,7 @@
 // Part of readsbee, a fork of readsb (https://github.com/wiedehopf/readsb).
 // GPL-3.0-or-later, see COPYING.
 //
-// readsbee feed protocol v2 frames: ADS-L 0xED, Remote ID 0xEF, UAT 0xEC S/L/U.
+// ADSBee Beast extensions (2026-11-06) frames: ADS-L 0xED, Remote ID 0xEF, UAT 0xEC S/L/U.
 // See README-readsbee.md and FEED-PROTOCOL.md.
 
 #include "readsb.h"
@@ -47,7 +47,7 @@ int beeExtParse(const char *p, const char *eod, uint8_t *body, int *blen) {
     const char *q = p + 2;
     int r, n;
     if (t == 0xED) {
-        // letter A|B|X, ts6 dbm1 rep1 L onair[L]
+        // letter A|B|X, ts6 sig1 rep1 L onair[L]
         if (!isLetter(k, "abx"))
             return -1;
         if ((r = takeN(&q, eod, body, 9)) <= 0)
@@ -59,7 +59,7 @@ int beeExtParse(const char *p, const char *eod, uint8_t *body, int *blen) {
             return r;
         n = 9 + L;
     } else if (t == 0xEF) {
-        // letter B|C|E|W|N, ts6 dbm1 mac6 odid[25 | 3 + 25n]
+        // letter B|C|E|W|N, ts6 sig1 mac6 odid[25 | 3 + 25n]
         if (!isLetter(k, "bcewn"))
             return -1;
         if ((r = takeN(&q, eod, body, 14)) <= 0)
@@ -215,37 +215,8 @@ static unsigned adslCategory(int cat) {
     return (cat >= 0 && cat < 18) ? map[cat] : 0;
 }
 
-// int8 dBm byte -> signalLevel on the ADSBee power-byte scale (0.75 dBFS per dB, 0 dBFS at
-// -40 dBm), capped at 1. Built once at startup: no pow per frame.
-static double dbmLevel[256];
-
-// tests: READSBEE_SIGNAL_LOG=<file> logs each frame's signal byte as read ("<fd> power|dbm <byte>")
-static FILE *signalLog;
-
-__attribute__((constructor)) static void initDbmLevel(void) {
-    for (int b = 0; b < 256; b++) {
-        int d = (int8_t) b;
-        double l = pow(10, 0.075 * (d + 40));
-        dbmLevel[b] = (d == -128) ? 0 : (l > 1 ? 1 : l);
-    }
-    const char *log = getenv("READSBEE_SIGNAL_LOG");
-    if (log && *log && (signalLog = fopen(log, "a")))
-        setvbuf(signalLog, NULL, _IOLBF, 0);
-}
-
-double beeSignal(const struct client *c, uint8_t b, struct beeMsg *bm) {
-    if (unlikely(signalLog != NULL))
-        fprintf(signalLog, "%d %s %u\n", c ? c->fd : -1,
-                (c && (c->bee.capsActive & BEE_CAP_SIG_DBM)) ? "dbm" : "power", b);
-    if (c && (c->bee.capsActive & BEE_CAP_SIG_DBM)) {
-        if (bm) {
-            bm->dbm = (int8_t) b;
-            bm->hasDbm = b != 0x80;
-        }
-        return dbmLevel[b];
-    }
-    if (bm)
-        bm->hasDbm = 0;
+// Beast power byte -> signalLevel, as readsb does for 0x31-0x33 and 0xEC (0 = no level)
+static double powerLevel(uint8_t b) {
     double l = b / 255.0;
     return l * l;
 }
@@ -259,11 +230,13 @@ int beeCapsFrame(struct client *c, const char *p, const char *eod, char *answer,
     if ((k != 'Q' && k != 'A' && k != 'C') || !(q[2] & 0x80) || !(q[3] & 0x80) || !(q[4] & 0x80))
         return -1;
     uint16_t bits = (q[3] & 0x7F) | (q[4] & 0x7F) << 7;
-    if (k == 'Q' && !(c->bee.capsState & BEE_CAPS_ANSWERED)) {
-        // first query only: answer what this readsbee accepts
-        c->bee.capsState |= BEE_CAPS_ANSWERED;
-        c->bee.capsOffered = bits;
+    if (k == 'Q' && !c->bee.capsAnswered) {
+        // first query only: answer what this readsbee accepts. The feeder sends offered AND
+        // answered right after it reads this; every frame says what it is, so no switch point.
         uint16_t a = Bee.capsAccept;
+        c->bee.capsAnswered = 1;
+        c->bee.capsOffered = bits;
+        c->bee.capsActive = bits & a;
         answer[0] = 0x1a;
         answer[1] = (char) 0xE5;
         answer[2] = 'A';
@@ -271,20 +244,9 @@ int beeCapsFrame(struct client *c, const char *p, const char *eod, char *answer,
         answer[4] = (char) (0x80 | (a & 0x7F));
         answer[5] = (char) (0x80 | ((a >> 7) & 0x7F));
         *answerLen = BEE_CAPS_LEN;
-    } else if (k == 'C' && !(c->bee.capsState & BEE_CAPS_CONFIRMED)) {
-        // the switch point: these bits apply from the next frame on
-        c->bee.capsState |= BEE_CAPS_CONFIRMED;
-        c->bee.capsActive = bits & Bee.capsAccept;
     }
-    // 'A' from a feeder, a second 'Q' or 'C': ignored
+    // 'A' from a feeder, a second 'Q', 'C' (reserved letter): skipped, no garbage
     return BEE_CAPS_LEN - 1;
-}
-
-void beeUatMessage(struct client *c, struct modesMessage *mm) {
-    if (c && c->bee.uatHasDbm) {
-        mm->bee.dbm = c->bee.uatDbm;
-        mm->bee.hasDbm = 1;
-    }
 }
 
 static void countFrame(struct client *c, int type) {
@@ -315,8 +277,7 @@ static void setTiming(struct client *c, uint8_t type, int64_t ts, int clock, int
     c->bee.timing.type = type;
 }
 
-static struct modesMessage *beeMM(struct client *c, struct messageBuffer *mb, int64_t now, const struct beeMsg *sig,
-        double level) {
+static struct modesMessage *beeMM(struct client *c, struct messageBuffer *mb, int64_t now, double level) {
     struct modesMessage *mm = netGetMM(mb);
     mm->client = c;
     mm->remote = 1;
@@ -330,16 +291,13 @@ static struct modesMessage *beeMM(struct client *c, struct messageBuffer *mb, in
     mm->signalLevel = level;
     mm->decoded_nic = 0;
     mm->decoded_rc = RC_UNKNOWN;
-    mm->bee.dbm = sig->dbm;
-    mm->bee.hasDbm = sig->hasDbm;
     return mm;
 }
 
 static void decodeAdslFrame(struct client *c, char letter, const uint8_t *body, int blen, int64_t now,
         struct messageBuffer *mb) {
     int64_t ts = ts48(body);
-    struct beeMsg sig = { 0 };
-    double level = beeSignal(c, body[6], &sig);
+    double level = powerLevel(body[6]);
     struct beeAdsl a;
     if (beeAdslDecode(body + 8, blen - 8, &a) != BEE_ADSL_OK || (a.ptype == 2 && !a.traffic)) {
         countFrame(c, BEE_FT_BAD);
@@ -351,7 +309,7 @@ static void decodeAdslFrame(struct client *c, char letter, const uint8_t *body, 
     if (!a.traffic || !a.addr)
         return; // Status and other payloads: counted only
 
-    struct modesMessage *mm = beeMM(c, mb, now, &sig, level);
+    struct modesMessage *mm = beeMM(c, mb, now, level);
     // AMT 5 is an ICAO address: same aircraft as its Mode S / ADS-B. Others go to the non-ICAO space.
     mm->addr = a.addr | (a.amt == 5 ? 0 : MODES_NON_ICAO_ADDRESS);
     if (a.pos_valid) {
@@ -405,11 +363,9 @@ static void decodeRidFrame(struct client *c, char letter, const uint8_t *body, i
         struct messageBuffer *mb) {
     int64_t ts = ts48(body);
     countFrame(c, BEE_FT_RID);
-    // ts 0 (today's firmware): readsbee stamps arrival
+    // Upper case: ts on the Mode S clock (not MLAT-grade, FEED-PROTOCOL.md §5); lower case: ts 0, arrival time
     setTiming(c, 0xEF, ts, clockOf(letter, ts), now);
-    struct beeMsg sig = { 0 };
-    double level = beeSignal(c, body[6], &sig);
-    beeRidInput(body + 13, blen - 13, body + 7, letter | 0x20, &sig, level,
+    beeRidInput(body + 13, blen - 13, body + 7, letter | 0x20, powerLevel(body[6]),
             c->receiverId, c->receiverId2, now, mb, c);
 }
 
@@ -458,10 +414,6 @@ int beeUatFrame(struct client *c, char letter, int64_t ts, int64_t now) {
 }
 
 void beeTrackUpdate(struct aircraft *a, struct modesMessage *mm, int64_t now) {
-    if (mm->bee.hasDbm) {
-        a->bee.dbm = mm->bee.dbm;
-        a->bee.dbmSeen = now;
-    }
     if (mm->bee.kind == 1)
         a->bee.adslSeen = now;
     else if (mm->bee.kind == 2)
@@ -472,16 +424,11 @@ void beeTrackUpdate(struct aircraft *a, struct modesMessage *mm, int64_t now) {
 }
 
 char *beeJsonAircraft(char *p, char *end, struct aircraft *a, int64_t now) {
-    // last level from a feed that sends dBm (rssi stays dBFS)
-    if (a->bee.dbmSeen && now - a->bee.dbmSeen < 60 * SECONDS)
-        p = safe_snprintf(p, end, ",\"dbm\":%d", a->bee.dbm);
     if (a->bee.adslSeen && now - a->bee.adslSeen < 60 * SECONDS) {
         const struct beeMsg *m = &a->bee.last;
         p = safe_snprintf(p, end, ",\"adsl\":{\"amt\":%u,\"cat\":%u,\"ch\":%s,\"seen\":%.1f",
                 m->amt, m->cat, m->channel == 0 ? "868.2" : m->channel == 1 ? "868.4" : "null",
                 (now - a->bee.adslSeen) / 1000.0);
-        if (m->hasDbm)
-            p = safe_snprintf(p, end, ",\"dbm\":%d", m->dbm);
         p = safe_snprintf(p, end, "}");
     }
     if (a->bee.ridSeen && now - a->bee.ridSeen < 60 * SECONDS)
@@ -537,8 +484,6 @@ struct beeDrone {
     double opLat, opLon;
     float opAlt;
     uint8_t opValid, opAltValid, opLocType, classType, catEU, classEU;
-    int8_t dbm;
-    uint8_t hasDbm;
     double level;    // signalLevel of the last frame with a level
     uint64_t msgs;
     struct { uint64_t hi, lo; int64_t t; } rx[RID_RX];
@@ -824,8 +769,7 @@ static struct beeDrone *ridMessage(const uint8_t *m, const uint8_t *mac, int64_t
     return d;
 }
 
-void beeRidInput(const uint8_t *odid, int len, const uint8_t *mac, char transport, const struct beeMsg *sig,
-        double level, uint64_t rxHi, uint64_t rxLo, int64_t now, struct messageBuffer *mb, struct client *c) {
+void beeRidInput(const uint8_t *odid, int len, const uint8_t *mac, char transport, double level, uint64_t rxHi, uint64_t rxLo, int64_t now, struct messageBuffer *mb, struct client *c) {
     const uint8_t *msgs = odid;
     int n = 1;
     if (odid[0] >> 4 == 0xF) {
@@ -845,11 +789,8 @@ void beeRidInput(const uint8_t *odid, int len, const uint8_t *mac, char transpor
         d = ridMessage(msgs + i * ODID_LEN, mac, now, &pos);
         d->seen = now;
         d->msgs++;
-        if (level > 0) {
+        if (level > 0)
             d->level = level;
-            d->dbm = sig->dbm;
-            d->hasDbm = sig->hasDbm;
-        }
         if (tp)
             d->transports |= 1 << (tp - ridTransports);
         noteReceiver(d, rxHi, rxLo, now);
@@ -863,7 +804,7 @@ void beeRidInput(const uint8_t *odid, int len, const uint8_t *mac, char transpor
     if (!haveSnap)
         return;
     // --readsbee-rid-globe: the drone as an aircraft (category B6) for tar1090
-    struct modesMessage *mm = beeMM(c, mb, now, sig, level);
+    struct modesMessage *mm = beeMM(c, mb, now, level);
     mm->addr = snap.hex | MODES_NON_ICAO_ADDRESS;
     mm->decoded_lat = snap.lat;
     mm->decoded_lon = snap.lon;
@@ -977,8 +918,6 @@ static char *printDrone(char *p, char *end, struct beeDrone *d, int full, int op
     }
     if (d->level > 0)
         p = safe_snprintf(p, end, ",\"rssi\":%.1f", 10 * log10(d->level));
-    if (d->hasDbm)
-        p = safe_snprintf(p, end, ",\"dbm\":%d", d->dbm);
     int nrx = 0;
     for (int i = 0; i < RID_RX; i++)
         nrx += d->rx[i].t && now - d->rx[i].t < Bee.ridTimeout;

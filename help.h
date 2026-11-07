@@ -174,7 +174,7 @@ static struct argp_option optionsReadsb[] = {
     {"net-uuid-deny-file", OptNetUuidDenyFile, "<path>", 0, "readsbee: UUIDs blocked, one per line, reloaded on change", 2},
     {"readsbee-rid-globe", OptReadsbeeRidGlobe, 0, 0, "readsbee: also show Remote ID drones as aircraft (aircraft.json, globe)", 2},
     {"readsbee-rid-operator", OptReadsbeeRidOperator, 0, 0, "readsbee: put Remote ID operator location / ID into remoteid.json and the API", 2},
-    {"readsbee-caps", OptReadsbeeCaps, "<bits>", 0, "readsbee: feature bits answered to an ADSBee capabilities query (default: 15 = dBm levels, ADS-L, Remote ID, upper-case UAT)", 2},
+    {"readsbee-caps", OptReadsbeeCaps, "<bits>", 0, "readsbee: feature bits answered to an ADSBee capabilities query (default: 14 = ADS-L, Remote ID, upper-case UAT)", 2},
     {"readsbee-rid-timeout", OptReadsbeeRidTimeout, "<seconds>", 0, "readsbee: drones are listed this long after their last message (default: 300)", 2},
     {"net-uuid-status-dir", OptNetUuidStatusDir, "<dir>", 0, "readsbee: write readsbee.json (filter status) here, keep it out of the web root", 2},
     {"net-garbage", OptGarbage, "<ports>", 0, "timeout receivers, output messages from timed out receivers as beast on <ports>", 2},
