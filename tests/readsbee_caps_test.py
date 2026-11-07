@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Feed spec v3.2 against a running readsb: capabilities answer, confirm, signal byte per connection.
+"""ADSBee Beast extensions (2026-11-06) against a running readsb: capabilities answer, confirm, signal byte per connection.
 
   python3 tests/readsbee_caps_test.py ./readsb [--captures DIR]
 
@@ -159,7 +159,7 @@ def test_vectors(tmp):
 
 def test_answers(tmp):
     vecs = {v["name"]: v for v in json.loads((D / "vectors" / "feed_vectors.json").read_text())}
-    for caps, name in ((None, "answer_v31_all"), ("14", "answer_v3_server"), ("4", "answer_rid_only"), ("0", "answer_none")):
+    for caps, name in ((None, "answer_all_dbm"), ("14", "answer_no_dbm"), ("4", "answer_rid_only"), ("0", "answer_none")):
         rs = Readsb(tmp, [f"--readsbee-caps={caps}"] if caps else [])
         try:
             s = socket.create_connection(("127.0.0.1", PORT_IN))
@@ -190,7 +190,7 @@ ODID = bytes([0x12]) + bytes(24)  # Location message, all zero
 
 
 def feeder(rs, delay, query=True, seconds=7.0, rate=200, icao0=0x700000):
-    """The v3.2 feeder: E4 + query, Beast at once, 'C' when the answer is seen (delay s after it
+    """The feeder: E4 + query, Beast at once, 'C' when the answer is seen (delay s after it
     arrived; ignored after 5 s), then the confirmed bits. Returns what it sent: (mode, byte) per
     signal reading, the Mode S frames by ICAO, and the confirmed bits (None = plain)."""
     s = socket.create_connection(("127.0.0.1", PORT_IN))

@@ -4,7 +4,7 @@
   python3 tests/gen_bee_vectors.py            write tests/bee_vectors.h
   python3 tests/gen_bee_vectors.py --check    exit 1 if tests/bee_vectors.h is stale (CI)
 
-feed_vectors.json:    readsbee feed protocol v3.2 golden vectors (FEED-PROTOCOL.md, readsbee_proto.py)
+feed_vectors.json:    ADSBee Beast extensions (2026-11-06) golden vectors (FEED-PROTOCOL.md, readsbee_proto.py)
 adsl_vectors.json:    ADS-L packets from the reference encoder
 odid_vectors.json:    ODID messages from opendroneid-core-c (tests/odid_gen.c)
 """

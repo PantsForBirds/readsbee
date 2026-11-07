@@ -1,7 +1,7 @@
 // Part of readsbee, a fork of readsb (https://github.com/wiedehopf/readsb).
 // GPL-3.0-or-later, see COPYING.
 //
-// readsbee feed protocol v2 frames: ADS-L 0xED, Remote ID 0xEF, UAT 0xEC S/L/U.
+// ADSBee Beast extensions (2026-11-06) frames: ADS-L 0xED, Remote ID 0xEF, UAT 0xEC S/L/U.
 // See README-readsbee.md and FEED-PROTOCOL.md.
 
 #include "readsb.h"

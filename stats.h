@@ -97,7 +97,7 @@ struct stats
   uint32_t remote_received_modeac;
   uint32_t remote_received_modes;
   uint32_t remote_received_basestation_valid;
-  uint32_t bee_frames[BEE_FT_COUNT]; // readsbee v2 frames
+  uint32_t bee_frames[BEE_FT_COUNT]; // readsbee extension frames
   uint32_t remote_received_basestation_invalid;
   uint32_t remote_rejected_bad;
   uint32_t remote_rejected_unknown_icao;

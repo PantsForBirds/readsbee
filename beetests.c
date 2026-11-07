@@ -329,7 +329,7 @@ static void testExtFrames(void) {
     CHECK(c.bee.ee[0x02] == 1 && c.bee.ee[0x01] == 1);
 }
 
-// --- v2 frames ---
+// --- extension frames ---
 
 struct feedVec { const char *name; const char *wire; int len; int type; const char *kind; char letter; int64_t ts; int sig; int dbmMode; int unknown; };
 struct capsVec { const char *name; const char *wire; int valid; char letter; int bits; };
@@ -360,7 +360,7 @@ static void testFeedVectors(void) {
             ts = ts << 8 | body[j];
         CHECK(ts == v->ts);
         CHECK(body[6] == v->sig);
-        // the signal byte follows the connection's mode (v3.2): dBm only after 'C' with bit 0
+        // the signal byte follows the connection's mode: dBm only after 'C' with bit 0
         struct client c;
         memset(&c, 0, sizeof(c));
         c.bee.capsActive = v->dbmMode ? BEE_CAP_SIG_DBM : 0;

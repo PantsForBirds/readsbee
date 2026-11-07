@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """readsbee end to end: runs ./readsb and feeds it over TCP.
-1. UUID filter (policy/example.so), 2. feed protocol v2 frames (UAT S/L/U, ADS-L, Remote ID) with an
+1. UUID filter (policy/example.so), 2. ADSBee Beast extension frames (UAT S/L/U, ADS-L, Remote ID) with an
 upstream connector to a local sink, 3. --readsbee-rid-globe.
 
 usage: tests/readsbee_net_test.py [path/to/readsb] [path/to/policy.so]
@@ -130,7 +130,7 @@ def load(path, wait_for=None, timeout=25):
     return last
 
 
-# ---- v2 frames ---------------------------------------------------------------------------------
+# ---- extension frames ---------------------------------------------------------------------------------
 V2 = "ab0000b2-0000-0000-0000-0000000000b2"  # first half differs from GOOD: filter_uuid uses it
 VDIR = Path(__file__).parent / "vectors"
 
@@ -253,9 +253,9 @@ def v2_frames(adsl_pkts, step):
     return out
 
 
-def test_v2(ip):
-    print("--- v2 frames")
-    tmp = tempfile.mkdtemp(prefix="readsbee-v2-")
+def test_extension_frames(ip):
+    print("--- extension frames")
+    tmp = tempfile.mkdtemp(prefix="readsbee-ext-")
     sdir = os.path.join(tmp, "status")
     # upstream connector to a local sink: must carry Mode S only
     sink = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -345,7 +345,7 @@ def test_v2(ip):
         ro = next((r for r in (rb or {}).get("receivers", []) if r.get("uuid") == GOOD), {})
         check(ro.get("frames", {}).get("adsl") == 5 and ro["frames"]["uat"] == 0, f"other receiver: 5 ADS-L (random address, paraglider) {ro.get('frames')}")
         check(r.get("last_timed", {}).get("clock") in ("modes", "not_mlat", "unsynced"), f"timing kept: {r.get('last_timed')}")
-        check(r.get("messages_s", 0) > 0 and r.get("positions", 0) > 0, f"v2 receiver rates: {r.get('messages_s')} msg/s, {r.get('positions')} positions")
+        check(r.get("messages_s", 0) > 0 and r.get("positions", 0) > 0, f"extension frame receiver rates: {r.get('messages_s')} msg/s, {r.get('positions')} positions")
         check(rb and rb["frames"]["adsl"] == 95 and rb["drones"] == 2, "readsbee.json totals")
         st = load(os.path.join(jdir, "stats.json"), lambda x: x.get("total", {}).get("remote", {}).get("readsbee", {}).get("adsl") == 95)
         sr = (st or {}).get("total", {}).get("remote", {}).get("readsbee", {})
@@ -564,7 +564,7 @@ def main():
             if "readsbee" in line:
                 print("  " + line.rstrip())
         shutil.rmtree(tmp)
-    test_v2(ip)
+    test_extension_frames(ip)
     test_rid_globe(ip)
     print(f"{'PASS' if not fails else 'FAIL'}: {fails} failed")
     return 1 if fails else 0

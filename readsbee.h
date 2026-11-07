@@ -14,7 +14,7 @@ struct messageBuffer;
 struct aircraft;
 struct modesMessage;
 
-// readsbee feed protocol v2 frames (FEED-PROTOCOL.md), counted per connection and in stats.json
+// ADSBee Beast extensions frames (docs/FEED-PROTOCOL.md), counted per connection and in stats.json
 enum beeFrameType {
     BEE_FT_ADSL = 0,  // 0xED ADS-L, decoded
     BEE_FT_RID,       // 0xEF Remote ID, decoded
@@ -106,7 +106,7 @@ struct beeClient {
     uint64_t dropped; // messages dropped while pending / rejected
     uint32_t ext[BEE_EXT_TYPES]; // extension frames skipped, per type
     uint32_t ee[BEE_EE_SUBS];    // 0xEE frames per subtype
-    uint32_t frames[BEE_FT_COUNT]; // v2 frames decoded per type
+    uint32_t frames[BEE_FT_COUNT]; // extension frames decoded per type
     struct beeTiming timing;     // last UAT / ADS-L / Remote ID frame
     uint16_t capsOffered;        // bits in the feeder's query
     uint16_t capsActive;         // bits in effect since its confirm
@@ -161,7 +161,7 @@ struct beeConfig {
     uint64_t ee_frames[BEE_EE_SUBS];
     uint64_t ext_too_long;
     pthread_mutex_t mutex; // guards the lists and the rejected table
-    // v2 frames
+    // extension frames
     uint64_t frames[BEE_FT_COUNT];
     int ridGlobe;          // --readsbee-rid-globe: drones also go into the aircraft table
     int ridOperator;       // --readsbee-rid-operator: operator location / ID in public outputs
@@ -205,7 +205,7 @@ int beeDrop(struct client *c);
 // readsbee.json in --net-uuid-status-dir (staff only: has reasons)
 void beeWriteJson(int64_t now);
 
-// --- v2 frames (readsbee_ext.c) ---
+// --- extension frames (readsbee_ext.c) ---
 // readBeast: p at the type byte of an extension frame (0xE0..0xFF, or 0xEC with an unknown
 // letter). Returns the bytes to skip from p, 0 if incomplete, -1 if too long (garbage).
 int beeExtFrame(struct client *c, char *p, char *eod, int64_t now, struct messageBuffer *mb);

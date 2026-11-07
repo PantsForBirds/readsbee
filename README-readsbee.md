@@ -7,7 +7,7 @@ to its authors).
 
 Branches: `dev` mirrors upstream, `readsbee` = `dev` + the files below. Merge upstream with
 `git merge dev` on `readsbee`. readsbee code lives in `readsbee.c/.h` and `readsbee_ext.c`
-(feed protocol v3.2 frames); upstream files only get short hooks.
+(ADSBee Beast extensions frames); upstream files only get short hooks.
 
 ## UUID filter
 
@@ -58,7 +58,7 @@ void readsbee_policy_reload(const char *arg);                // optional, config
 or any plugin with `cc -O2 -fPIC -shared -I. plugin.c -o plugin.so` against the same libc as
 readsbee. readsb exits if the plugin can't be loaded.
 
-## Feed protocol v3.2
+## ADSBee Beast extensions (2026-11-06)
 
 ADSBee TCP Beast feeds ask the server what it accepts; readsbee answers, and the feeder then adds
 these frames and dBm signal levels. Every payload bounds itself; `0x1a` in a body is doubled.
@@ -175,7 +175,7 @@ readsbee built `WITH_UUIDS=yes`. Same env vars as ultrafeeder; add the options a
 ```
 make test WITH_UUIDS=yes                                        # includes beetests
 python3 tests/readsbee_net_test.py ./readsb policy/example.so   # end to end over TCP
-python3 tests/readsbee_caps_test.py ./readsb [--captures DIR]   # feed spec v3.2: answers, signal byte per connection
+python3 tests/readsbee_caps_test.py ./readsb [--captures DIR]   # Beast extensions: answers, signal byte per connection
 python3 tests/gen_bee_vectors.py                                # after editing tests/vectors/*.json
 ```
 
