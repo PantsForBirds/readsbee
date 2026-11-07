@@ -45,11 +45,9 @@ def feed():
         letter = ""
         if d.get("type") in (0xEC, 0xED, 0xEF):
             letter = chr(bytes.fromhex(v["hex"])[2])
-        # signal byte as sent, and whether it is int8 dBm (vector signal_mode dbm)
-        dbm_mode = "dbm" in d
-        sig = P.dbm_byte(d["dbm"]) if dbm_mode else d.get("rssi", 0)
+        # signal byte as sent: the Beast power byte on every frame type
         out.append(f'    {{ {cstr(v["name"])}, {b}, {n}, 0x{d.get("type", 0):02x}, {cstr(kind)}, '
-                   f'{(repr(letter) if letter else "0")}, {d.get("ts", 0)}LL, {sig}, {int(dbm_mode)}, {v["unknown"]} }},')
+                   f'{(repr(letter) if letter else "0")}, {d.get("ts", 0)}LL, {d.get("rssi", 0)}, {v["unknown"]} }},')
     out.append("};")
     mixed = next(v for v in vecs if v["name"] == "mixed_stream")
     b, n = cbytes(mixed["hex"])
@@ -58,7 +56,7 @@ def feed():
     out.append(f"static const int feedMixedLen = {n};")
     out.append(f"static const int feedMixedTypes[] = {{ {types} }};")
     out.append(f"static const int feedMixedUnknown = {mixed['unknown']};")
-    # 0xE5 frames on their own: valid (Q / A / C, bits) or malformed
+    # 0xE5 frames on their own: valid (Q / A, bits) or malformed
     out.append("static const struct capsVec capsVecs[] = {")
     for v in vecs:
         w = bytes.fromhex(v["hex"])
@@ -68,9 +66,6 @@ def feed():
         b, n = cbytes(v["hex"])
         out.append(f'    {{ {cstr(v["name"])}, {b}, {int(r is not None)}, {repr(r[0]) if r else "0"}, {r[2] if r else 0} }},')
     out.append("};")
-    # signalLevel for every dBm byte (readsbee_proto.signal_level_from_dbm)
-    lv = ", ".join(repr(P.signal_level_from_dbm(P.dbm_from_byte(i))) for i in range(256))
-    out.append(f"static const double dbmLevels[256] = {{ {lv} }};")
     return out
 
 

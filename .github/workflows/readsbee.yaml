@@ -27,7 +27,7 @@ jobs:
         run: make test WITH_UUIDS=yes
       - name: Network test
         run: python3 tests/readsbee_net_test.py ./readsb policy/example.so
-      - name: ADSBee Beast extensions test (capabilities, signal byte per connection)
+      - name: ADSBee Beast extensions test (capabilities answer, power bytes)
         run: python3 tests/readsbee_caps_test.py ./readsb
 
   image:

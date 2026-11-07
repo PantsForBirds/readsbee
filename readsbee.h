@@ -47,8 +47,6 @@ struct beeMsg {
     uint8_t amt;     // ADS-L address mapping table
     uint8_t cat;     // ADS-L aircraft category (G.1.3)
     uint8_t channel; // 0 868.2, 1 868.4, 0xFF unknown
-    int8_t dbm;      // valid if hasDbm
-    uint8_t hasDbm;  // the level came in as dBm (connection confirmed bit 0)
     int8_t clock;
     int64_t ts;
 };
@@ -58,8 +56,6 @@ struct beeAircraft {
     int64_t adslSeen;
     int64_t ridSeen;
     struct beeMsg last;
-    int64_t dbmSeen; // last message with a dBm level
-    int8_t dbm;
 };
 
 // Per connection filter state
@@ -81,15 +77,13 @@ enum beeReason {
 };
 
 // capabilities check 0xE5 (FEED-PROTOCOL.md §7): feature bits
-#define BEE_CAP_SIG_DBM 0x01   // signal byte of every frame is int8 dBm after 'C'
+// bit 0 (0x01) reserved: never set, ignored (was dBm signal levels, removed 2026-11-07)
 #define BEE_CAP_ADSL 0x02      // 0xED
 #define BEE_CAP_RID 0x04       // 0xEF
 #define BEE_CAP_UAT_UPPER 0x08 // 0xEC S/L/U
-#define BEE_CAP_KNOWN 0x0F
+#define BEE_CAP_KNOWN 0x0E
 #define BEE_CAPS_LEN 6         // 1a E5 letter ver f0 f1
 #define BEE_CAPS_VERSION 1
-#define BEE_CAPS_ANSWERED 0x01 // capsState
-#define BEE_CAPS_CONFIRMED 0x02
 
 #define BEE_EXT_FIRST 0xE0  // extension frame types counted: 0xE0..0xFF
 #define BEE_EXT_TYPES 32
@@ -109,10 +103,8 @@ struct beeClient {
     uint32_t frames[BEE_FT_COUNT]; // extension frames decoded per type
     struct beeTiming timing;     // last UAT / ADS-L / Remote ID frame
     uint16_t capsOffered;        // bits in the feeder's query
-    uint16_t capsActive;         // bits in effect since its confirm
-    uint8_t capsState;           // BEE_CAPS_ANSWERED | BEE_CAPS_CONFIRMED
-    uint8_t uatHasDbm;           // decodeEncapsulatedUAT -> decodeUatMessage
-    int8_t uatDbm;
+    uint16_t capsActive;         // offered AND answered: what the feeder sends after the answer
+    uint8_t capsAnswered;        // a query was answered on this connection
 };
 
 struct beeUuid {
@@ -224,14 +216,9 @@ void beeWriteRemoteId(int64_t now);
 // /re-api/?remoteid[&filter_uuid=...], buffer starts with pad free bytes
 int beeApiRemoteId(uint64_t filter_uuid, int pad, char **buf, int *len);
 
-// signal byte -> signalLevel: int8 dBm (256-entry table) if the connection confirmed bit 0,
-// else the Beast power byte. Sets bm->dbm / hasDbm when bm is given.
-double beeSignal(const struct client *c, uint8_t b, struct beeMsg *bm);
 // readBeast: p at 0xE5. Returns the bytes to skip from p, 0 incomplete, -1 malformed.
 // *answerLen = BEE_CAPS_LEN when answer[] must be sent back on this connection.
 int beeCapsFrame(struct client *c, const char *p, const char *eod, char *answer, int *answerLen);
-// decodeUatMessage: dBm of the 0xEC frame being decoded
-void beeUatMessage(struct client *c, struct modesMessage *mm);
 
 // decoders (unit tested in beetests.c)
 struct beeAdsl {
@@ -251,7 +238,7 @@ void beeXxteaDecrypt(uint8_t *data, int len); // key 0, 6 rounds, len % 4 == 0
 // 0 incomplete, -1 bad. body / blen: unescaped bytes after the letter.
 int beeExtParse(const char *p, const char *eod, uint8_t *body, int *blen);
 // Remote ID: feed one ODID message or pack (as in the frame), mac 6 bytes
-void beeRidInput(const uint8_t *odid, int len, const uint8_t *mac, char transport, const struct beeMsg *sig,
+void beeRidInput(const uint8_t *odid, int len, const uint8_t *mac, char transport,
         double level, uint64_t rxHi, uint64_t rxLo, int64_t now, struct messageBuffer *mb, struct client *c);
 int beeRidCount(void);
 // JSON of the drone table (public = 1: no operator data unless --readsbee-rid-operator)

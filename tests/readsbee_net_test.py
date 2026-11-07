@@ -239,11 +239,11 @@ def v2_frames(adsl_pkts, step):
             out[-1] += proto.enc_uat("u", ts, 90, bytes(552), modes_clock=True)
         if True:
             for k, pkt in enumerate(adsl_pkts(i)):
-                out[-1] += proto.enc_adsl(pkt, ts + i, -87 - k, "ab"[k % 2], repaired=i % 3)
+                out[-1] += proto.enc_adsl(pkt, ts + i, proto.dbm_to_power(-87 - k), "ab"[k % 2], repaired=i % 3)
         if i == 5:
-            out[-1] += proto.enc_rid(odid["pack"], 0, -60, "w", mac_w)
-            out[-1] += proto.enc_rid(odid["location_fast"], 0, -75, "b", mac_b)
-            out[-1] += proto.enc_rid(odid["basic_id_session"], 0, -75, "b", mac_b)
+            out[-1] += proto.enc_rid(odid["pack"], 0, proto.dbm_to_power(-60), "w", mac_w)
+            out[-1] += proto.enc_rid(odid["location_fast"], 0, proto.dbm_to_power(-75), "b", mac_b)
+            out[-1] += proto.enc_rid(odid["basic_id_session"], 0, proto.dbm_to_power(-75), "b", mac_b)
         if i == 7:
             # bad frames: unknown letters, failed bound, unknown type. Only these are lost.
             out[-1] += b"\x1a\xedQ" + esc(bytes(20))
@@ -306,7 +306,7 @@ def test_extension_frames(ip):
         check("bee001" in h and h["bee001"].get("category") == "B1", "second real ADS-L packet (glider, negative lat)")
         check(not any(x.get("category") == "B6" for x in h.values()), "drones not in aircraft.json by default")
         for i in range(5):  # the other receiver's aircraft needs fresh positions for filter_uuid
-            other.sendall(proto.enc_adsl(adsl_traffic(0, 0x0A0020, 47.5 + i * 0.001, 8.7, 600, 5, 7), 0, -95, "x", modes_clock=False))
+            other.sendall(proto.enc_adsl(adsl_traffic(0, 0x0A0020, 47.5 + i * 0.001, 8.7, 600, 5, 7), 0, proto.dbm_to_power(-95), "x", modes_clock=False))
             time.sleep(0.3)
 
         # API, per receiver
@@ -403,7 +403,7 @@ def test_rid_globe(ip):
         s = connect(ip)
         s.sendall(uuid_frame(V2))
         for _ in range(4):  # a drone sends about once a second
-            s.sendall(proto.enc_rid(pack, 0, -60, "w", bytes.fromhex("6a1a2b3c4d5e")))
+            s.sendall(proto.enc_rid(pack, 0, proto.dbm_to_power(-60), "w", bytes.fromhex("6a1a2b3c4d5e")))
             time.sleep(1)
         ac = load(os.path.join(jdir, "aircraft.json"), lambda d: any(a.get("category") == "B6" for a in d.get("aircraft", [])), 10)
         dr = [a for a in (ac or {}).get("aircraft", []) if a.get("category") == "B6"]

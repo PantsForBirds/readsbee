@@ -331,7 +331,7 @@ static void testExtFrames(void) {
 
 // --- extension frames ---
 
-struct feedVec { const char *name; const char *wire; int len; int type; const char *kind; char letter; int64_t ts; int sig; int dbmMode; int unknown; };
+struct feedVec { const char *name; const char *wire; int len; int type; const char *kind; char letter; int64_t ts; int sig; int unknown; };
 struct capsVec { const char *name; const char *wire; int valid; char letter; int bits; };
 struct adslVec { const char *name; const char *pkt; int len; int crc_ok; int ptype; int amt; uint32_t addr; int cat; int fstate;
     double lat, lon, alt, gs, vrate, track; };
@@ -359,15 +359,7 @@ static void testFeedVectors(void) {
         for (int j = 0; j < 6; j++)
             ts = ts << 8 | body[j];
         CHECK(ts == v->ts);
-        CHECK(body[6] == v->sig);
-        // the signal byte follows the connection's mode: dBm only after 'C' with bit 0
-        struct client c;
-        memset(&c, 0, sizeof(c));
-        c.bee.capsActive = v->dbmMode ? BEE_CAP_SIG_DBM : 0;
-        struct beeMsg bm = { 0 };
-        double l = beeSignal(&c, body[6], &bm);
-        CHECK(v->dbmMode ? (bm.hasDbm == (v->sig != 0x80) && NEAR(l, dbmLevels[v->sig], 1e-12))
-                         : (!bm.hasDbm && NEAR(l, (v->sig / 255.0) * (v->sig / 255.0), 1e-12)));
+        CHECK(body[6] == v->sig); // the Beast power byte, as on every frame type
         // every shorter read is incomplete, never bad
         for (int n = 1; n < v->len - 1; n++)
             CHECK(beeExtParse(p, p + n, body, &blen) == 0);
@@ -416,21 +408,20 @@ static void testCaps(void) {
         int alen = -1;
         int r = beeCapsFrame(&c, v->wire + 1, v->wire + 6, answer, &alen);
         if (!v->valid) {
-            CHECK(r == -1 && alen == 0 && c.bee.capsState == 0);
+            CHECK(r == -1 && alen == 0 && !c.bee.capsAnswered);
             continue;
         }
         CHECK(r == 5);
         for (int n = 1; n < 5; n++) // shorter: incomplete
             CHECK(beeCapsFrame(&c, v->wire + 1, v->wire + 1 + n, answer, &alen) == 0);
         if (v->letter == 'Q') {
-            // answered once, with every known bit by default: 1a e5 41 81 8f 80
-            CHECK(c.bee.capsOffered == v->bits && c.bee.capsActive == 0);
+            // answered once, with every known bit by default: 1a e5 41 81 8e 80. In effect at once.
+            CHECK(c.bee.capsAnswered && c.bee.capsOffered == v->bits
+                  && c.bee.capsActive == (v->bits & BEE_CAP_KNOWN));
             int a2;
             CHECK(beeCapsFrame(&c, v->wire + 1, v->wire + 6, answer, &a2) == 5 && a2 == 0);
-        } else if (v->letter == 'C') {
-            CHECK(c.bee.capsActive == (v->bits & BEE_CAP_KNOWN) && (c.bee.capsState & BEE_CAPS_CONFIRMED));
         } else {
-            CHECK(c.bee.capsState == 0 && c.bee.capsActive == 0); // 'A' from a feeder: ignored
+            CHECK(!c.bee.capsAnswered && c.bee.capsActive == 0); // 'A' from a feeder: ignored
         }
     }
     struct client c;
@@ -438,28 +429,18 @@ static void testCaps(void) {
     char answer[BEE_CAPS_LEN];
     int alen;
     const char q[] = { 0x1a, (char) 0xE5, 'Q', (char) 0x81, (char) 0x8F, (char) 0x80 };
+    // a query with reserved bit 0 (an older feeder): bit 0 is never answered
     CHECK(beeCapsFrame(&c, q + 1, q + 6, answer, &alen) == 5 && alen == 6
-          && memcmp(answer, "\x1a\xe5\x41\x81\x8f\x80", 6) == 0);
-    // --readsbee-caps narrows the answer and the confirmed bits
+          && memcmp(answer, "\x1a\xe5\x41\x81\x8e\x80", 6) == 0 && c.bee.capsActive == BEE_CAP_KNOWN);
+    // --readsbee-caps narrows the answer and the bits in effect
     memset(&c, 0, sizeof(c));
     Bee.capsAccept = BEE_CAP_RID;
-    CHECK(beeCapsFrame(&c, q + 1, q + 6, answer, &alen) == 5 && memcmp(answer, "\x1a\xe5\x41\x81\x84\x80", 6) == 0);
+    CHECK(beeCapsFrame(&c, q + 1, q + 6, answer, &alen) == 5 && memcmp(answer, "\x1a\xe5\x41\x81\x84\x80", 6) == 0
+          && c.bee.capsActive == BEE_CAP_RID);
+    Bee.capsAccept = BEE_CAP_KNOWN;
+    // 'C' is a reserved letter: skipped as one 6-byte frame, no answer, nothing changes
     const char cf[] = { 0x1a, (char) 0xE5, 'C', (char) 0x81, (char) 0x8F, (char) 0x80 };
     CHECK(beeCapsFrame(&c, cf + 1, cf + 6, answer, &alen) == 5 && alen == 0 && c.bee.capsActive == BEE_CAP_RID);
-    Bee.capsAccept = BEE_CAP_KNOWN;
-    // a second 'C' changes nothing
-    const char c0[] = { 0x1a, (char) 0xE5, 'C', (char) 0x81, (char) 0x80, (char) 0x80 };
-    CHECK(beeCapsFrame(&c, c0 + 1, c0 + 6, answer, &alen) == 5 && c.bee.capsActive == BEE_CAP_RID);
-
-    // dBm table: every byte as readsbee_proto.signal_level_from_dbm; no connection = power byte
-    memset(&c, 0, sizeof(c));
-    c.bee.capsActive = BEE_CAP_SIG_DBM;
-    int bad = 0;
-    for (int b = 0; b < 256; b++) {
-        bad += !NEAR(beeSignal(&c, b, NULL), dbmLevels[b], 1e-12);
-        bad += !NEAR(beeSignal(NULL, b, NULL), (b / 255.0) * (b / 255.0), 1e-15);
-    }
-    CHECK(bad == 0);
 }
 
 static void testAdsl(void) {
@@ -521,20 +502,14 @@ static void testAdsl(void) {
     struct client c;
     memset(&c, 0, sizeof(c));
     c.receiverId = 0xbee0003ca8bd5d38ULL;
-    // no confirmed bit 0: the signal byte a9 is a power byte
-    testUsed = 0;
-    CHECK(beeExtFrame(&c, frame, frame + n + 2, NOW, &testMb) == n);
-    CHECK(testUsed == 1 && !testMsgs[0].bee.hasDbm && NEAR(testMsgs[0].signalLevel, (169 / 255.0) * (169 / 255.0), 1e-12));
-    // after 'C' with bit 0: int8 dBm
-    memset(&c.bee.frames, 0, sizeof(c.bee.frames));
-    c.bee.capsActive = BEE_CAP_SIG_DBM;
+    // the signal byte a9 is a power byte (169)
     testUsed = 0;
     CHECK(beeExtFrame(&c, frame, frame + n + 2, NOW, &testMb) == n);
     CHECK(testUsed == 1 && c.bee.frames[BEE_FT_ADSL] == 1 && c.bee.frames[BEE_FT_BAD] == 0);
     struct modesMessage *mm = &testMsgs[0];
     CHECK(mm->addr == 0xBEE000); // AMT 5: ICAO
-    CHECK(mm->bee.kind == 1 && mm->bee.amt == 5 && mm->bee.channel == 1 && mm->bee.hasDbm && mm->bee.dbm == -87);
-    CHECK(NEAR(mm->signalLevel, pow(10, 0.075 * (-87 + 40)), 1e-12));
+    CHECK(mm->bee.kind == 1 && mm->bee.amt == 5 && mm->bee.channel == 1);
+    CHECK(NEAR(mm->signalLevel, (169 / 255.0) * (169 / 255.0), 1e-12));
     CHECK(mm->bee.clock == BEE_CLK_MODES && mm->bee.ts == 0x0000011a0005LL);
     CHECK(mm->sbs_in && mm->sbs_pos_valid && NEAR(mm->decoded_lat, v->lat, 1e-9));
     CHECK(mm->geom_alt_valid && mm->geom_alt == 3281 && mm->category_valid && mm->category == 0xA1);
@@ -579,7 +554,7 @@ static void testRemoteId(void) {
         const struct odidVec *v = &odidVecs[i];
         int before = fails;
         beeRidReset();
-        beeRidInput((const uint8_t *) v->msg, v->len, mac, 'w', &(struct beeMsg) { .dbm = -60, .hasDbm = 1 }, 0.01, 0xbee0000000000001ULL, 2, NOW, NULL, NULL);
+        beeRidInput((const uint8_t *) v->msg, v->len, mac, 'w', 0.01, 0xbee0000000000001ULL, 2, NOW, NULL, NULL);
         CHECK(beeRidCount() == 1);
         CHECK(beeRidJson(&buf, &len, 0, 0, 0, NOW));
         if (v->id[0] && v->idType == 1) {
@@ -611,7 +586,7 @@ static void testRemoteId(void) {
             snprintf(want, sizeof(want), "\"operator_id\":\"%s\"", v->opId);
             CHECK(jsonHas(buf, want));
         }
-        CHECK(jsonHas(buf, "\"transports\":[\"wifi_beacon\"]") && jsonHas(buf, "\"dbm\":-60"));
+        CHECK(jsonHas(buf, "\"transports\":[\"wifi_beacon\"]") && jsonHas(buf, "\"rssi\":-20.0") && !strstr(buf, "\"dbm\""));
         CHECK(jsonHas(buf, "\"macs\":[\"c0:ff:ee:1a:00:01\"]") && jsonHas(buf, "\"uuids\":[\"bee00000-0000-0001-0000-000000000002\"]"));
         free(buf);
         // public: no operator data, no MACs, no UUIDs
@@ -628,10 +603,10 @@ static void testRemoteId(void) {
     const struct odidVec *basic = &odidVecs[0], *loc = &odidVecs[2];
     const uint8_t mac2[6] = { 0x6a, 0x1a, 0x2b, 0x3c, 0x4d, 0x5e };
     beeRidReset();
-    beeRidInput((const uint8_t *) loc->msg, 25, mac, 'b', &(struct beeMsg) { .dbm = -80, .hasDbm = 1 }, 0.01, 0x1111, 1, NOW, NULL, NULL);
-    beeRidInput((const uint8_t *) basic->msg, 25, mac, 'b', &(struct beeMsg) { .dbm = -80, .hasDbm = 1 }, 0.01, 0x1111, 1, NOW + 100, NULL, NULL);
+    beeRidInput((const uint8_t *) loc->msg, 25, mac, 'b', 0.01, 0x1111, 1, NOW, NULL, NULL);
+    beeRidInput((const uint8_t *) basic->msg, 25, mac, 'b', 0.01, 0x1111, 1, NOW + 100, NULL, NULL);
     CHECK(beeRidCount() == 1);
-    beeRidInput((const uint8_t *) basic->msg, 25, mac2, 'w', &(struct beeMsg) { .dbm = -70, .hasDbm = 1 }, 0.01, 0x2222, 2, NOW + 200, NULL, NULL);
+    beeRidInput((const uint8_t *) basic->msg, 25, mac2, 'w', 0.01, 0x2222, 2, NOW + 200, NULL, NULL);
     CHECK(beeRidCount() == 1);
     CHECK(beeRidJson(&buf, &len, 0, 0, 0, NOW + 300));
     CHECK(jsonHas(buf, "\"transports\":[\"bt4_legacy\",\"wifi_beacon\"]") && jsonHas(buf, "\"receivers\":2"));
@@ -650,7 +625,7 @@ static void testRemoteId(void) {
     memset(&c, 0, sizeof(c));
     Bee.ridGlobe = 1;
     testUsed = 0;
-    beeRidInput((const uint8_t *) odidVecs[8].msg, odidVecs[8].len, mac, 'w', &(struct beeMsg) { .dbm = -60, .hasDbm = 1 }, 0.01, 1, 1, NOW, &testMb, &c);
+    beeRidInput((const uint8_t *) odidVecs[8].msg, odidVecs[8].len, mac, 'w', 0.01, 1, 1, NOW, &testMb, &c);
     CHECK(testUsed == 1 && testMsgs[0].bee.kind == 2 && testMsgs[0].category == 0xB6);
     CHECK((testMsgs[0].addr & MODES_NON_ICAO_ADDRESS) && testMsgs[0].sbs_pos_valid);
     Bee.ridGlobe = 0;

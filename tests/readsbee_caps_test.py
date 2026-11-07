@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-"""ADSBee Beast extensions (2026-11-06) against a running readsb: capabilities answer, confirm, signal byte per connection.
+"""ADSBee Beast extensions (2026-11-06) against a running readsb: capabilities answer, power bytes.
 
   python3 tests/readsbee_caps_test.py ./readsb [--captures DIR]
 
-1. Every feeder -> server vector of tests/vectors/feed_vectors.json over its own connection: each
-   frame's signal byte must be read as the vector decodes it (power byte or dBm, same value), and
-   a query must get exactly one answer.
-2. The answer bytes for --readsbee-caps 15 / 14 / 4 / 0 equal the server -> feeder vectors.
-3. Feeder model: answer seen after 0 s, 1 s or 6 s (5 s timeout: plain), a server without bit 0,
-   and a feeder that never queries. Misread signal levels must be 0, and readsb's Beast output
-   must carry the level the feeder meant.
-4. --captures DIR: the t-1069 ADSBee captures (no query) replay in power-byte mode.
-
-readsb logs each frame's signal byte to READSBEE_SIGNAL_LOG ("<fd> power|dbm <byte>").
+1. Every feeder -> server vector of tests/vectors/feed_vectors.json over its own connection: a
+   query gets exactly one answer, nothing else does, and no connection is closed. The exchange
+   vectors run in order: query, the answer (byte-exact), then the agreed frames.
+2. The answer bytes for --readsbee-caps default / 14 / 4 / 0 equal the server -> feeder vectors;
+   reserved bit 0 is never answered.
+3. Feeder model: answer seen after 0 s, 1 s or 6 s (5 s timeout: plain), a server answering
+   Remote ID only, and a feeder that never queries. The feeder sends the agreed frames as soon as
+   it has read the answer (no confirm frame). Every signal byte is a power byte: readsb's Beast
+   output must carry each Mode S frame's byte back, and the drones' rssi must match theirs.
+4. aircraft.json / remoteid.json: rssi in dBFS from the power byte, no "dbm" field.
+5. --captures DIR: the t-1069 ADSBee captures replay (Mode S aircraft and the bench drone).
 """
 import json
 import math
@@ -43,53 +44,35 @@ def check(cond, what):
 
 class Readsb:
     def __init__(self, tmp, extra=()):
-        self.log = Path(tmp) / f"signal{len(list(Path(tmp).glob('signal*')))}.log"
         self.jdir = Path(tmp) / "json"
         self.jdir.mkdir(exist_ok=True)
-        env = dict(os.environ, READSBEE_SIGNAL_LOG=str(self.log))
         self.p = subprocess.Popen([READSB, "--net", "--net-only", "--quiet", f"--net-bi-port={PORT_IN}",
                                    "--net-ro-port=0", "--net-sbs-port=0", f"--net-bo-port={PORT_OUT}",
                                    f"--write-json={self.jdir}", "--write-json-every=1", *extra],
-                                  env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for _ in range(100):
             try:
                 socket.create_connection(("127.0.0.1", PORT_IN), timeout=1).close()
                 break
             except OSError:
                 time.sleep(0.05)
-        self.pos = 0
 
-    def readings(self, n, timeout=5.0):
-        """Next signal log lines after the last call, waiting for at least n, then a little more."""
+    def json(self, name, ok=lambda x: True, timeout=5.0):
         end = time.time() + timeout
-        out = []
-        while True:
-            text = self.log.read_text() if self.log.exists() else ""
-            out = text[self.pos:].splitlines()
-            if len(out) >= n or time.time() > end:
-                time.sleep(0.2)
-                text = self.log.read_text()
-                break
-            time.sleep(0.02)
-        new = text[self.pos:]
-        self.pos = len(text)
-        return [(m, int(b)) for _, m, b in (line.split() for line in new.splitlines())]
+        last = {}
+        while time.time() < end:
+            try:
+                last = json.loads((self.jdir / name).read_text())
+                if ok(last):
+                    break
+            except (OSError, ValueError):
+                pass
+            time.sleep(0.2)
+        return last
 
     def stop(self):
         self.p.terminate()
         self.p.wait()
-
-
-def expected_readings(vec):
-    out = []
-    for f in vec["decoded"]:
-        if "ts" not in f:
-            continue
-        if "dbm" in f:
-            out.append(("dbm", P.dbm_byte(f["dbm"])))
-        else:
-            out.append(("power", f["rssi"]))
-    return out
 
 
 def recv_some(s, n, timeout):
@@ -100,16 +83,27 @@ def recv_some(s, n, timeout):
         while len(data) < n and time.time() < end:
             chunk = s.recv(4096)
             if not chunk:
-                break
+                return data, True
             data += chunk
     except socket.timeout:
         pass
-    return data
+    return data, False
+
+
+def still_open(s):
+    """readsb closes a feed with a FIN; nothing to read and no EOF = still open."""
+    s.setblocking(False)
+    try:
+        return s.recv(1, socket.MSG_PEEK) != b""
+    except BlockingIOError:
+        return True
+    finally:
+        s.setblocking(True)
 
 
 def test_vectors(tmp):
     vecs = json.loads((D / "vectors" / "feed_vectors.json").read_text())
-    rs = Readsb(tmp, ["--modeac"])  # without it readsb ignores 0x31 input before the signal byte
+    rs = Readsb(tmp, ["--modeac"])
     answer = P.enc_caps(P.CAPS_ANSWER, P.CAP_KNOWN)
     n_ok = n_vec = 0
     try:
@@ -117,54 +111,53 @@ def test_vectors(tmp):
             if v.get("direction") == "server_to_feeder":
                 continue
             n_vec += 1
-            wire = bytes.fromhex(v["hex"])
-            if v.get("signal_mode") == "dbm":  # decoded as after 'C' with bit 0
-                wire = P.enc_caps(P.CAPS_CONFIRM, P.CAP_KNOWN) + wire
-            want = expected_readings(v)
             queries = sum(f.get("kind") == "caps_query" for f in v["decoded"])
             s = socket.create_connection(("127.0.0.1", PORT_IN))
-            s.sendall(wire)
-            back = recv_some(s, 64, 0.6 if queries else 0.3)
+            if "exchange" in v:
+                # query (and what was sent while waiting), the answer, then the agreed frames
+                feeder1, server, feeder2 = (bytes.fromhex(x["hex"]) for x in v["exchange"])
+                s.sendall(feeder1)
+                back, eof = recv_some(s, 6, 1.0)
+                good = back == answer and server[:3] == answer[:3]
+                s.sendall(feeder2)
+            else:
+                s.sendall(bytes.fromhex(v["hex"]))
+                back, eof = recv_some(s, 64, 0.6 if queries else 0.3)
+                good = back == (answer if queries else b"")
+            time.sleep(0.05)
+            good = good and not eof and still_open(s)
             s.close()
-            got = rs.readings(len(want))
-            good = got == want and back == (answer if queries else b"")
             n_ok += good
             if not good:
-                print(f"  {v['name']}: readings {got} want {want}, back {back.hex()} ({queries} queries)")
-        check(n_ok == n_vec, f"vectors through readsb: {n_ok}/{n_vec} byte-exact (signal byte per frame, answers)")
+                print(f"  {v['name']}: back {back.hex()} ({queries} queries), eof {eof}")
+        check(n_ok == n_vec, f"vectors through readsb: {n_ok}/{n_vec} (answer only to a query, no close)")
 
-        # one answer per connection: a second query is ignored, a client 'A' is ignored
+        # one answer per connection: a second query, a client 'A' and the reserved 'C' are ignored
         s = socket.create_connection(("127.0.0.1", PORT_IN))
-        s.sendall(P.enc_uuid(UUID) + P.enc_caps("Q", 15) + P.enc_caps("Q", 15) + P.enc_caps("A", 15))
-        back = recv_some(s, 64, 1.0)
+        s.sendall(P.enc_uuid(UUID) + bytes.fromhex("1ae543818e80") + P.enc_caps("Q", 14) + P.enc_caps("Q", 14)
+                  + P.enc_caps("A", 14) + bytes.fromhex("1ae543818e80"))
+        back, _ = recv_some(s, 64, 1.0)
         s.close()
-        check(back == answer, f"two queries and an 'A': one answer ({back.hex()})")
-        # a second 'C' doesn't change the mode
-        s = socket.create_connection(("127.0.0.1", PORT_IN))
-        ds = bytes.fromhex("5d4840d6abcdef")
-        s.sendall(P.enc_caps("C", 15) + P.enc_mode_s(ds, 1, dbm=-87) + P.enc_caps("C", 14) + P.enc_mode_s(ds, 2, dbm=-87))
-        time.sleep(0.3)
-        s.close()
-        got = rs.readings(2)
-        check(got == [("dbm", 0xa9), ("dbm", 0xa9)], f"second 'C' ignored: {got}")
+        check(back == answer, f"'C', two queries, an 'A', 'C': one answer ({back.hex()})")
         # a plain Beast client gets nothing back
         s = socket.create_connection(("127.0.0.1", PORT_IN))
-        s.sendall(P.enc_uuid(UUID) + P.enc_mode_s(ds, 1, rssi=4))
-        back = recv_some(s, 64, 1.0)
+        s.sendall(P.enc_uuid(UUID) + P.enc_mode_s(bytes.fromhex("5d4840d6abcdef"), 1, 4))
+        back, _ = recv_some(s, 64, 1.0)
         s.close()
-        check(back == b"" and rs.readings(1) == [("power", 4)], "no query: nothing sent back, power byte")
+        check(back == b"", "no query: nothing sent back")
     finally:
         rs.stop()
 
 
 def test_answers(tmp):
     vecs = {v["name"]: v for v in json.loads((D / "vectors" / "feed_vectors.json").read_text())}
-    for caps, name in ((None, "answer_all_dbm"), ("14", "answer_no_dbm"), ("4", "answer_rid_only"), ("0", "answer_none")):
+    for caps, name in ((None, "answer_all"), ("15", "answer_all"), ("14", "answer_all"),
+                       ("4", "answer_rid_only"), ("0", "answer_none")):
         rs = Readsb(tmp, [f"--readsbee-caps={caps}"] if caps else [])
         try:
             s = socket.create_connection(("127.0.0.1", PORT_IN))
-            s.sendall(P.enc_uuid(UUID) + P.enc_caps("Q", 15))
-            back = recv_some(s, 6, 2.0)
+            s.sendall(P.enc_uuid(UUID) + P.enc_caps("Q", 15))  # an older feeder that still offers bit 0
+            back, _ = recv_some(s, 6, 2.0)
             s.close()
             check(back.hex() == vecs[name]["hex"], f"--readsbee-caps={caps or 'default'}: answer {back.hex()} = {name}")
         finally:
@@ -187,12 +180,13 @@ def df17(icao: int) -> bytes:
 ADSL_ONAIR = bytes([26]) + bytes.fromhex("00021a3c4d5e6f1a1a00112233445566778899aabb0102a1b2c3")
 MAC = bytes.fromhex("c0ffee1a0001")
 ODID = bytes([0x12]) + bytes(24)  # Location message, all zero
+RID_POWER = P.dbm_to_power(-72)  # 16
 
 
-def feeder(rs, delay, query=True, seconds=7.0, rate=200, icao0=0x700000):
-    """The feeder: E4 + query, Beast at once, 'C' when the answer is seen (delay s after it
-    arrived; ignored after 5 s), then the confirmed bits. Returns what it sent: (mode, byte) per
-    signal reading, the Mode S frames by ICAO, and the confirmed bits (None = plain)."""
+def feeder(delay, query=True, seconds=7.0, rate=200, icao0=0x700000):
+    """The feeder: E4 + query, Beast at once, the agreed frames from the moment the answer is
+    read (delay s after it arrived; ignored after 5 s). Returns the power byte per Mode S ICAO,
+    the agreed bits (None = plain) and the extension frames sent before / after the answer."""
     s = socket.create_connection(("127.0.0.1", PORT_IN))
     s.setblocking(False)
     t0 = time.time()
@@ -200,8 +194,8 @@ def feeder(rs, delay, query=True, seconds=7.0, rate=200, icao0=0x700000):
     scan = P.AnswerScanner()
     arrived = None
     bits = None
-    sent = []
     modes = {}
+    ext = {"rid": 0, "adsl": 0, "upper": 0}
     i = 0
     while time.time() - t0 < seconds:
         try:
@@ -213,42 +207,30 @@ def feeder(rs, delay, query=True, seconds=7.0, rate=200, icao0=0x700000):
         except BlockingIOError:
             pass
         if bits is None and arrived is not None and time.time() >= arrived + delay:
-            if time.time() - t0 <= P.CAPS_ANSWER_TIMEOUT_S:
-                bits = P.negotiate(P.CAP_KNOWN, scan.answer[1])
-                s.sendall(P.enc_caps(P.CAPS_CONFIRM, bits))
-            else:
-                bits = -1  # too late: plain until this connection closes
-        dbm_mode = bits is not None and bits > 0 and bits & P.CAP_SIG_DBM
-        d = -105 + (i * 7) % 80  # -105 .. -26 dBm
+            bits = P.negotiate(P.CAP_KNOWN, scan.answer[1]) if time.time() - t0 <= P.CAPS_ANSWER_TIMEOUT_S else -1
+        agreed = bits if bits and bits > 0 else 0
+        b = P.dbm_to_power(-105 + (i * 7) % 80)  # -105 .. -26 dBm: power bytes 1 .. 255
         icao = icao0 + i
-        if dbm_mode:
-            frame, sig = P.enc_mode_s(df17(icao), i, dbm=d), ("dbm", P.dbm_byte(d))
-        else:
-            frame, sig = P.enc_mode_s(df17(icao), i, rssi=P.dbm_to_power(d)), ("power", P.dbm_to_power(d))
-        modes[icao] = sig
-        sent.append(sig)
-        out = frame
-        if i % 10 == 5:  # UAT, ADS-L and Remote ID too (readsbee decodes them even from feeds that didn't query)
-            up = bool(bits and bits > 0 and bits & P.CAP_UAT_MODES_CLOCK)
-            if dbm_mode:
-                out += P.enc_uat("s", i, None, bytes(30), modes_clock=up, dbm=d)
-                out += P.enc_adsl(ADSL_ONAIR, i, d, "a")
-                out += P.enc_rid(ODID, 0, d, "b", MAC)
-                sig = ("dbm", P.dbm_byte(d))
-            else:
-                b = P.dbm_to_power(d)
-                out += P.enc_uat("s", i, b, bytes(30), modes_clock=up)
-                out += P.enc_adsl(ADSL_ONAIR, i, None, "a", rssi=b)
-                out += P.enc_rid(ODID, 0, None, "b", MAC, rssi=b)
-                sig = ("power", b)
-            sent += [sig, sig, sig]
+        modes[icao] = b
+        out = P.enc_mode_s(df17(icao), i, b)
+        if i % 10 == 5:
+            up = bool(agreed & P.CAP_UAT_MODES_CLOCK)
+            out += P.enc_uat("s", i, b, bytes(30), modes_clock=up)
+            ext["upper"] += up
+            if agreed & P.CAP_ADSL:
+                out += P.enc_adsl(ADSL_ONAIR, i, b, "a")
+                ext["adsl"] += 1
+            if agreed & P.CAP_RID:
+                out += P.enc_rid(ODID, 0, RID_POWER, "b", MAC)
+                ext["rid"] += 1
         s.setblocking(True)
         s.sendall(out)
         s.setblocking(False)
         i += 1
         time.sleep(1 / rate)
+    open_ = still_open(s)
     s.close()
-    return sent, modes, bits
+    return modes, bits, ext, open_
 
 
 def beast_out_levels(port):
@@ -269,68 +251,59 @@ def beast_out_levels(port):
         out = {}
         for f in P.Decoder().feed(bytes(buf)):
             if f.type == 0x33:
-                body = f.body
-                msg = body[7:]
-                out[int.from_bytes(msg[1:4], "big")] = body[6]
+                out[int.from_bytes(f.body[8:11], "big")] = f.body[6]
         return out
     return s, drain
 
 
 def test_feeder(tmp):
-    cases = [("answer at once", {}, 0.0, True, "dbm"),
-             ("answer after 1 s", {}, 1.0, True, "dbm"),
-             ("answer after 6 s (timeout)", {}, 6.0, True, "plain"),
-             ("server without bit 0", {"caps": "14"}, 0.0, True, "no_dbm"),
-             ("feeder never queries", {}, 0.0, False, "plain")]
-    for k, (name, opt, delay, query, mode) in enumerate(cases):
+    known = P.CAP_KNOWN
+    cases = [("answer at once", {}, 0.0, True, known),
+             ("answer after 1 s", {}, 1.0, True, known),
+             ("answer after 6 s (timeout)", {}, 6.0, True, -1),
+             ("server answers Remote ID only", {"caps": "4"}, 0.0, True, P.CAP_RID),
+             ("feeder never queries", {}, 0.0, False, None)]
+    for k, (name, opt, delay, query, want_bits) in enumerate(cases):
         rs = Readsb(tmp, [f"--readsbee-caps={opt['caps']}"] if "caps" in opt else [])
         try:
             out, drain = beast_out_levels(PORT_OUT)
-            sent, modes, bits = feeder(rs, delay, query, icao0=0x700000 + k * 0x10000)
-            got = rs.readings(len(sent), timeout=10)
-            misread = sum(a != b for a, b in zip(got, sent)) + abs(len(got) - len(sent))
-            n_dbm = sum(m == "dbm" for m, _ in sent)
-            want_dbm = {"dbm": n_dbm > 0, "plain": n_dbm == 0, "no_dbm": n_dbm == 0}[mode]
-            check(misread == 0 and want_dbm and (mode != "plain" or bits in (None, -1)),
-                  f"feeder, {name}: {len(sent)} levels, {n_dbm} in dBm, misread {misread}, confirmed bits {bits}")
-            # the Beast output carries each frame's level as a standard power byte
+            modes, bits, ext, open_ = feeder(delay, query, icao0=0x700000 + k * 0x10000)
+            check(bits == want_bits and open_, f"feeder, {name}: agreed bits {bits}, ext frames {ext}, open {open_}")
+            # the Beast output carries each frame's power byte back (readsb: sqrt(level) * 255)
             time.sleep(1.5)
             levels = drain()
             out.close()
-            bad = 0
-            for icao, (m, b) in modes.items():
-                if icao not in levels:
-                    continue
-                if m == "dbm":
-                    lvl = 0 if b == 0x80 else min(1.0, 10 ** (0.075 * ((b - 256 if b > 127 else b) + 40)))
-                else:
-                    lvl = (b / 255) ** 2
-                want = min(255, max(1, round(math.sqrt(lvl) * 255)))
-                bad += abs(levels[icao] - want) > 1
+            bad = sum(abs(levels[icao] - max(1, b)) > 1 for icao, b in modes.items() if icao in levels)
             check(len(levels) > len(modes) * 0.9 and bad == 0,
                   f"feeder, {name}: Beast output levels {len(levels)}/{len(modes)} frames, {bad} off")
+            if ext["rid"]:
+                rid = rs.json("remoteid.json", lambda x: x.get("drones"))
+                d = (rid.get("drones") or [{}])[0]
+                want = 20 * math.log10(RID_POWER / 255)
+                check(abs(d.get("rssi", 99) - want) < 0.11 and "dbm" not in d,
+                      f"feeder, {name}: drone rssi {d.get('rssi')} dBFS = power byte {RID_POWER}, no dbm")
         finally:
             rs.stop()
 
 
 def test_json(tmp):
-    """aircraft.json: rssi stays dBFS, dbm only from dBm feeds; remoteid.json likewise."""
+    """aircraft.json: rssi is dBFS from the power byte, no dbm field, for feeds with and without a query."""
     rs = Readsb(tmp)
     try:
         a, b = 0x7A0001, 0x7A0002
         s = socket.create_connection(("127.0.0.1", PORT_IN))
-        s.sendall(P.enc_uuid(UUID) + P.enc_caps("Q", 15))
+        s.sendall(P.enc_uuid(UUID) + P.enc_caps("Q", 14))
         recv_some(s, 6, 1.0)
-        s.sendall(P.enc_caps("C", 15) + b"".join(P.enc_mode_s(df17(a), i, dbm=-87) for i in range(8)))
+        s.sendall(b"".join(P.enc_mode_s(df17(a), i, P.dbm_to_power(-60)) for i in range(8)))
         t = socket.create_connection(("127.0.0.1", PORT_IN))
-        t.sendall(P.enc_uuid(UUID) + b"".join(P.enc_mode_s(df17(b), i, rssi=P.dbm_to_power(-87)) for i in range(8)))
-        time.sleep(2.5)
-        ac = {x["hex"]: x for x in json.loads((rs.jdir / "aircraft.json").read_text())["aircraft"]}
-        da, db = ac.get(f"{a:06x}", {}), ac.get(f"{b:06x}", {})
-        check(da.get("dbm") == -87 and abs(da.get("rssi", 0) - 0.75 * (-87 + 40)) < 0.2,
-              f"aircraft.json, dBm feed: dbm {da.get('dbm')}, rssi {da.get('rssi')} dBFS")
-        check("dbm" not in db and abs(db.get("rssi", 0) - 20 * math.log10(4 / 255)) < 0.2,
-              f"aircraft.json, power-byte feed: no dbm, rssi {db.get('rssi')} dBFS")
+        t.sendall(P.enc_uuid(UUID) + b"".join(P.enc_mode_s(df17(b), i, P.dbm_to_power(-87)) for i in range(8)))
+        ac = rs.json("aircraft.json", lambda x: len(x.get("aircraft", [])) >= 2)
+        ac = {x["hex"]: x for x in ac.get("aircraft", [])}
+        for icao, dbm, what in ((a, -60, "answered feed"), (b, -87, "plain feed")):
+            x = ac.get(f"{icao:06x}", {})
+            want = 20 * math.log10(P.dbm_to_power(dbm) / 255)
+            check("dbm" not in x and abs(x.get("rssi", 99) - want) < 0.2,
+                  f"aircraft.json, {what}: rssi {x.get('rssi')} dBFS (power byte {P.dbm_to_power(dbm)}), no dbm")
         s.close()
         t.close()
     finally:
@@ -340,7 +313,7 @@ def test_json(tmp):
 def test_captures(tmp, d):
     for name in ("beast.bin", "readsbee.bin"):
         data = (Path(d) / name).read_bytes()
-        want = [f for f in P.Decoder().feed(data) if f.type in (0x31, 0x32, 0x33, 0xEC, 0xED, 0xEF)]
+        n_ef = sum(f.type == 0xEF for f in P.Decoder().feed(data))
         rs = Readsb(tmp)
         try:
             s = socket.create_connection(("127.0.0.1", PORT_IN))
@@ -348,17 +321,15 @@ def test_captures(tmp, d):
                 s.sendall(data[i:i + 8192])
                 time.sleep(0.001)
             time.sleep(1)
-            got = rs.readings(len(want), timeout=20)
-            s.close()
-            exp = [("power", f.body[6]) for f in want]
-            n_ef = sum(f.type == 0xEF for f in want)
-            check(got == exp, f"capture {name}: {len(got)}/{len(exp)} signal bytes read as power bytes ({n_ef} 0xEF)")
+            ac = rs.json("aircraft.json", lambda x: x.get("aircraft"))
+            check(len(ac.get("aircraft", [])) > 0 and still_open(s),
+                  f"capture {name}: {len(ac.get('aircraft', []))} aircraft, connection open")
             if n_ef:
-                time.sleep(1.5)
-                rid = json.loads((rs.jdir / "remoteid.json").read_text())
+                rid = rs.json("remoteid.json", lambda x: x.get("drones"))
                 ids = [x.get("id") for x in rid.get("drones", [])]
                 check(ids == ["ADSBEEBENCHA"] and all("dbm" not in x for x in rid["drones"]),
-                      f"capture {name}: drones {ids}, levels as power bytes (no dbm)")
+                      f"capture {name}: drones {ids} ({n_ef} 0xEF), no dbm")
+            s.close()
         finally:
             rs.stop()
 
