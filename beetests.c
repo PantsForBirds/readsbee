@@ -333,6 +333,7 @@ static void testExtFrames(void) {
 
 struct feedVec { const char *name; const char *wire; int len; int type; const char *kind; char letter; int64_t ts; int sig; int unknown; };
 struct capsVec { const char *name; const char *wire; int valid; char letter; int bits; };
+struct gpsVec { const char *name; const char *wire; int len; int64_t ts; int sub; int64_t utc; int step; int32_t rate; };
 struct adslVec { const char *name; const char *pkt; int len; int crc_ok; int ptype; int amt; uint32_t addr; int cat; int fstate;
     double lat, lon, alt, gs, vrate, track; };
 struct odidVec { const char *name; const char *msg; int len; const char *id; int idType; int uaType; int loc; int status;
@@ -415,7 +416,7 @@ static void testCaps(void) {
         for (int n = 1; n < 5; n++) // shorter: incomplete
             CHECK(beeCapsFrame(&c, v->wire + 1, v->wire + 1 + n, answer, &alen) == 0);
         if (v->letter == 'Q') {
-            // answered once, with every known bit by default: 1a e5 41 81 8e 80. In effect at once.
+            // answered once, with every known bit by default: 1a e5 41 81 8f 80. In effect at once.
             CHECK(c.bee.capsAnswered && c.bee.capsOffered == v->bits
                   && c.bee.capsActive == (v->bits & BEE_CAP_KNOWN));
             int a2;
@@ -429,9 +430,9 @@ static void testCaps(void) {
     char answer[BEE_CAPS_LEN];
     int alen;
     const char q[] = { 0x1a, (char) 0xE5, 'Q', (char) 0x81, (char) 0x8F, (char) 0x80 };
-    // a query with reserved bit 0 (an older feeder): bit 0 is never answered
+    // bit 0 = GPS time sync 0xE6 (2026-11-26): answered by default, 8f
     CHECK(beeCapsFrame(&c, q + 1, q + 6, answer, &alen) == 5 && alen == 6
-          && memcmp(answer, "\x1a\xe5\x41\x81\x8e\x80", 6) == 0 && c.bee.capsActive == BEE_CAP_KNOWN);
+          && memcmp(answer, "\x1a\xe5\x41\x81\x8f\x80", 6) == 0 && c.bee.capsActive == BEE_CAP_KNOWN);
     // --readsbee-caps narrows the answer and the bits in effect
     memset(&c, 0, sizeof(c));
     Bee.capsAccept = BEE_CAP_RID;
@@ -441,6 +442,92 @@ static void testCaps(void) {
     // 'C' is a reserved letter: skipped as one 6-byte frame, no answer, nothing changes
     const char cf[] = { 0x1a, (char) 0xE5, 'C', (char) 0x81, (char) 0x8F, (char) 0x80 };
     CHECK(beeCapsFrame(&c, cf + 1, cf + 6, answer, &alen) == 5 && alen == 0 && c.bee.capsActive == BEE_CAP_RID);
+}
+
+static void testGpsTime(void) {
+    // vectors: decode, every shorter read incomplete
+    struct beeGpsTime g;
+    for (size_t i = 0; i < sizeof(gpsVecs) / sizeof(gpsVecs[0]); i++) {
+        const struct gpsVec *v = &gpsVecs[i];
+        const char *p = v->wire + 1, *eod = v->wire + v->len;
+        int r = beeGpsTimeParse(p, eod, &g);
+        CHECK(r == v->len - 1 && g.ts == v->ts && g.sub == v->sub && g.utc == v->utc && g.step == v->step
+              && g.rate == v->rate);
+        if (r != v->len - 1)
+            fprintf(stderr, "  gps vector %s: %d\n", v->name, r);
+        for (int n = 1; n < v->len - 1; n++)
+            CHECK(beeGpsTimeParse(p, p + n, &g) == 0);
+    }
+    const struct gpsVec *sv = &gpsVecs[0], *nv = &gpsVecs[2]; // gps_time, gps_time_rate_unknown
+    CHECK(strcmp(sv->name, "gps_time") == 0 && strcmp(nv->name, "gps_time_rate_unknown") == 0);
+    char buf[64];
+    memcpy(buf, sv->wire, sv->len);
+    buf[15] |= 0x7E; // reserved flag bits: ignored
+    CHECK(beeGpsTimeParse(buf + 1, buf + sv->len, &g) == sv->len - 1 && !g.step);
+    buf[15] = 0x01; // no 0x80: malformed
+    CHECK(beeGpsTimeParse(buf + 1, buf + sv->len, &g) == -1);
+    buf[15] = (char) 0x80;
+    buf[2] = 'Q'; // reserved letter
+    CHECK(beeGpsTimeParse(buf + 1, buf + sv->len, &g) == -1);
+    // short frame followed by Mode S: lone 0x1a inside, malformed; beeExtFrame skips to the 1a 32
+    struct client c;
+    memset(&c, 0, sizeof(c));
+    const char modes[] = "\x1a\x32\x00\x00\x00\x00\x00\x01\x04\x5d\x48\x40\xd6\xab\xcd\xef";
+    memcpy(buf, sv->wire, 10);
+    memcpy(buf + 10, modes, 16);
+    CHECK(beeGpsTimeParse(buf + 1, buf + 26, &g) == -1);
+    CHECK(beeExtFrame(&c, buf + 1, buf + 26, NOW, &testMb) == 9 && c.bee.frames[BEE_FT_BAD] == 1 && !c.bee.gps[0].when);
+    // the latest two frames are kept, the newest first; counted, ext 0xE6 counted
+    memset(&c, 0, sizeof(c));
+    memcpy(buf, sv->wire, sv->len);
+    memcpy(buf + sv->len, modes, 16);
+    CHECK(beeExtFrame(&c, buf + 1, buf + sv->len + 16, NOW, &testMb) == sv->len - 1);
+    memcpy(buf, nv->wire, nv->len);
+    memcpy(buf + nv->len, modes, 16);
+    CHECK(beeExtFrame(&c, buf + 1, buf + nv->len + 16, NOW + 2000, &testMb) == nv->len - 1);
+    CHECK(c.bee.frames[BEE_FT_GPS_TIME] == 2 && c.bee.ext[0xE6 - BEE_EXT_FIRST] == 2 && c.bee.frames[BEE_FT_BAD] == 0);
+    CHECK(c.bee.gps[0].utc == nv->utc && c.bee.gps[1].utc == sv->utc && c.bee.gps[0].when == NOW + 2000);
+
+    // conversion (§12.3), same cases as readsbee_proto.py
+    struct beeGpsTime s2[2], cur;
+    memset(s2, 0, sizeof(s2));
+    CHECK(beeGpsTimeParse(sv->wire + 1, sv->wire + sv->len, &s2[0]) > 0);
+    s2[0].when = NOW;
+    int64_t sec;
+    double ns, r;
+    CHECK(beeGpsUtc(s2, s2[0].ts, &sec, &ns) && sec == sv->utc - 1
+          && NEAR(ns, 1e9 * (1 - 0.5 / 12e6 / (1 + 17300e-9)), 1e-3));
+    CHECK(beeGpsUtc(s2, s2[0].ts + 6000104, &sec, &ns) && sec == sv->utc && NEAR(ns, 5e8, 42));
+    CHECK(!beeGpsUtc(s2, s2[0].ts + 5 * 12000000LL, &sec, &ns));          // beyond 4 s
+    CHECK(beeGpsUtc(s2, s2[0].ts - 4 * 12000000LL + 1000, &sec, &ns));     // 4 s before
+    struct beeGpsTime w[2] = { s2[0], s2[1] };
+    w[0].ts = ((int64_t) 1 << 48) - 12000000;
+    w[0].sub = 0;
+    CHECK(beeGpsUtc(w, 1000, &sec, &ns) && sec == sv->utc + 1
+          && NEAR(ns, ((12e6 + 1000) / (12e6 * (1 + 17300e-9)) - 1) * 1e9, 1));   // 48-bit wrap
+    // rate unknown: one frame is not enough, the pair gives 17.3 ppm
+    struct beeGpsTime u[2];
+    memset(u, 0, sizeof(u));
+    CHECK(beeGpsTimeParse(nv->wire + 1, nv->wire + nv->len, &u[0]) > 0 && u[0].rate == BEE_GPS_RATE_UNKNOWN);
+    u[0].when = NOW + 2000;
+    CHECK(!beeGpsUtc(u, u[0].ts, &sec, &ns));
+    u[1] = s2[0];
+    CHECK(beeGpsPairRate(&u[1], &u[0], &r) && NEAR(r, 17300, 0.2));
+    CHECK(beeGpsUtc(u, u[0].ts + 6000104, &sec, &ns) && sec == nv->utc && NEAR(ns, 5e8, 42));
+    // step: no pair; consecutive pair 13 ticks off or a mislabeled second: refused
+    cur = s2[0];
+    cur.utc += 1;
+    cur.ts += 12000208;
+    cur.when = NOW + 1000;
+    struct beeGpsTime pr[2] = { cur, s2[0] };
+    CHECK(beeGpsPairRate(&pr[1], &pr[0], &r) && beeGpsUtc(pr, cur.ts, &sec, &ns));
+    pr[0].ts += 13;
+    CHECK(!beeGpsPairRate(&pr[1], &pr[0], &r) && !beeGpsUtc(pr, cur.ts, &sec, &ns));
+    pr[0].step = 1; // after a step the frame stands alone
+    CHECK(!beeGpsPairRate(&pr[1], &pr[0], &r) && beeGpsUtc(pr, cur.ts, &sec, &ns));
+    pr[0] = cur;
+    pr[0].utc += 1; // one second mislabeled
+    CHECK(!beeGpsPairRate(&pr[1], &pr[0], &r) && !beeGpsUtc(pr, cur.ts, &sec, &ns));
 }
 
 static void testAdsl(void) {
@@ -654,6 +741,7 @@ int main(int argc, char **argv) {
     testExtFrames();
     testFeedVectors();
     testCaps();
+    testGpsTime();
     testAdsl();
     testRemoteId();
     rmdir(dir);

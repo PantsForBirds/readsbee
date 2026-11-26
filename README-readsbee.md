@@ -67,13 +67,14 @@ Full spec: [docs/FEED-PROTOCOL.md](docs/FEED-PROTOCOL.md).
 | frame | after `0x1a <type>` | |
 |---|---|---|
 | `0xE5` capabilities | `Q` / `A` (`C` reserved), ver1, bits2 (high bit set, never escaped) | query answered once |
+| `0xE6` GPS time sync | `P`, ts6, sub1, utc5, flags1 (high bit set), rate3 | latest two kept per connection, shown in `readsbee.json` |
 | `0xEC` UAT | `s l u` / `S L U`, ts6, sig1, 30 / 48 / 552 bytes | decoded as upstream; upper case = ts on the feed's Mode S clock |
 | `0xED` ADS-L | `A B X` (868.2, 868.4, unknown), ts6, sig1, repaired1, L, L bytes | decoded into the aircraft table |
 | `0xEF` Remote ID | `B C E W N` (BT4, BT5 coded, BT5 1M, Wi-Fi beacon, NaN), ts6, sig1, MAC6, ODID message or pack | decoded into the drone table |
 
 - **Capabilities.** On `1a E5 Q ver f0 f1` (first one per connection) readsbee sends
-  `1a E5 A 81 <bits>` back on the same socket: bit 1 ADS-L, 2 Remote ID, 3 upper-case UAT (bit 0
-  is reserved and never answered). `--readsbee-caps=<bits>` narrows it (default 14). The feeder
+  `1a E5 A 81 <bits>` back on the same socket: bit 0 GPS time sync `0xE6`, 1 ADS-L, 2 Remote ID,
+  3 upper-case UAT. `--readsbee-caps=<bits>` narrows it (default 15, `8f`). The feeder
   sends what both sides agreed from the moment it reads the answer; there is no confirm frame.
   A later `Q`, an `A` from a feeder, the reserved `C` and anything malformed are ignored.
   Nothing is sent to a client that doesn't query, so stock clients see no change.
@@ -81,6 +82,14 @@ Full spec: [docs/FEED-PROTOCOL.md](docs/FEED-PROTOCOL.md).
   upstream (0 = none). Outputs are unchanged: `rssi` is dBFS everywhere, Beast outputs carry
   standard power bytes.
 - Frames from feeds that never queried are decoded too.
+- **GPS time sync `0xE6 'P'`** (spec §12): one frame per labeled PPS edge, the edge's 12 MHz count
+  (ts6 + sub1/256) on the connection's Mode S clock and its POSIX second, `step` (flags `0x01`) and the
+  counter rate in ppb (`80 00 00` = unknown). readsbee keeps the latest two per connection and shows
+  them per receiver in `readsbee.json` (`gps_time`). `beeGpsUtc()` converts a 12 MHz timestamp of that
+  connection to UTC per §12.3 (within 4 s of the edge, consecutive frames must agree within 1 µs,
+  rate from the pair when the feeder sends none, no pair across `step`); nothing uses it yet (MLAT,
+  outputs: later). Flags without `0x80` or a cut-short frame: skipped, counted as `bad`, the feed stays
+  open; other letters are reserved and skipped. Never forwarded.
 - Lower case letters: ts is not on the Mode S clock (never MLAT); upper case with ts 0: not
   synced yet. The last timed frame of each connection (ts, clock, epoch: +1 when ts drops back
   to 0, i.e. the sub-GHz clock was re-based) is kept for a later MLAT path.
@@ -91,9 +100,10 @@ Full spec: [docs/FEED-PROTOCOL.md](docs/FEED-PROTOCOL.md).
   SBS, ...), and `0xE5` is never forwarded. UAT stays as upstream: converted to ADS-R-style DF18 messages like any readsb.
 - Feeds blocked by the UUID filter: frames are dropped, not decoded.
 - Reference decoder and golden vectors: `tests/readsbee_proto.py`, `tests/vectors/feed_vectors.json`.
-  Tests: `beetests` (vectors, caps frames) and `tests/readsbee_caps_test.py` (vectors through a
-  running readsb, answers per `--readsbee-caps`, a simulated feeder with 0 / 1 / 6 s answer
-  delays, power bytes back out of the Beast output).
+  Tests: `beetests` (vectors, caps frames, `0xE6` parse and UTC conversion) and
+  `tests/readsbee_caps_test.py` (vectors through a running readsb, answers per `--readsbee-caps`,
+  a simulated feeder with 0 / 1 / 6 s answer delays, power bytes back out of the Beast output,
+  `0xE6` among 3000 Mode S frames with `--net-ingest`, malformed ones, `readsbee.json`).
 
 ### ADS-L
 
@@ -132,17 +142,20 @@ Drones are not in `aircraft.json` or the globe unless `--readsbee-rid-globe` is 
 
 ### Counts
 
-Per type: `adsl`, `rid`, `uat`, `uat_mlat` (upper case with ts ≠ 0), `bad`.
+Per type: `adsl`, `rid`, `uat`, `uat_mlat` (upper case with ts ≠ 0), `bad`, `gps_time` (`0xE6` decoded).
 - `stats.json`: `remote.readsbee` in each period (`last1min`, `total`, ...).
 - `readsbee.json`: `frames` in total and per receiver (with `since` = connection start and
   `last_timed`), `drones` = drones listed now. Each receiver also has the `clients.json` columns
   without addresses: `conn_s`, `kbps`, `messages_s`, `positions_s` (averages over the
   connection), `messages`, `positions`, and for feeders that queried
-  `caps` = `{"offered":14,"active":14}` (bits offered, offered AND answered).
+  `caps` = `{"offered":15,"active":15}` (bits offered, offered AND answered), and after an `0xE6`
+  `gps_time` = `{"utc","ts","sub","rate_ppb","step","age","prev_utc","pair_rate_ppb","usable"}`
+  (latest frame; `prev_utc` / `pair_rate_ppb` from the one before, null without a consistent pair;
+  `usable`: a timestamp at its edge converts to UTC).
 
 | option | |
 |---|---|
-| `--readsbee-caps=<bits>` | feature bits answered to a capabilities query (default 14: ADS-L, Remote ID, upper-case UAT; bit 0 reserved) |
+| `--readsbee-caps=<bits>` | feature bits answered to a capabilities query (default 15: GPS time sync, ADS-L, Remote ID, upper-case UAT) |
 | `--readsbee-rid-operator` | operator location / ID in public outputs (default off) |
 | `--readsbee-rid-globe` | drones also as aircraft |
 | `--readsbee-rid-timeout=<s>` | drones listed this long after the last message (300) |

@@ -1,7 +1,7 @@
 // Part of readsbee, a fork of readsb (https://github.com/wiedehopf/readsb).
 // GPL-3.0-or-later, see COPYING.
 //
-// ADSBee Beast extensions (2026-11-06) frames: ADS-L 0xED, Remote ID 0xEF, UAT 0xEC S/L/U.
+// ADSBee Beast extensions (2026-11-06) frames: ADS-L 0xED, Remote ID 0xEF, UAT 0xEC S/L/U, GPS time 0xE6.
 // See README-readsbee.md and FEED-PROTOCOL.md.
 
 #include "readsb.h"
@@ -373,8 +373,104 @@ static int blocked(struct client *c) {
     return c->bee.state == BEE_PENDING || c->bee.state == BEE_REJECTED;
 }
 
+// --- GPS time sync 0xE6 (FEED-PROTOCOL.md §12) ----------------------------------------------
+
+#define GPS_TICKS_PER_S 12000000.0
+#define GPS_PAIR_TOLERANCE_TICKS 12.0 // 1 us
+#define TS48_MOD ((int64_t) 1 << 48)
+
+int beeGpsTimeParse(const char *p, const char *eod, struct beeGpsTime *out) {
+    if (p + 1 >= eod)
+        return 0;
+    if (p[1] != 'P')
+        return -1; // other letters reserved
+    const char *q = p + 2;
+    uint8_t b[BEE_GPS_BODY_LEN];
+    int r = takeN(&q, eod, b, BEE_GPS_BODY_LEN);
+    if (r <= 0)
+        return r;
+    if (!(b[12] & 0x80))
+        return -1;
+    memset(out, 0, sizeof(*out));
+    out->ts = ts48(b);
+    out->sub = b[6];
+    for (int i = 7; i < 12; i++)
+        out->utc = out->utc << 8 | b[i];
+    out->step = b[12] & 0x01;
+    int32_t rate = (int32_t) ((uint32_t) b[13] << 16 | b[14] << 8 | b[15]);
+    if (rate & 0x800000)
+        rate -= 1 << 24;
+    out->rate = (rate == -(1 << 23)) ? BEE_GPS_RATE_UNKNOWN : rate;
+    return q - p;
+}
+
+// a - b as a signed 48-bit difference (the counter wraps every 271.5 days)
+static int64_t d48(int64_t a, int64_t b) {
+    int64_t d = (a - b) & (TS48_MOD - 1);
+    return d >= TS48_MOD / 2 ? d - TS48_MOD : d;
+}
+
+int beeGpsPairRate(const struct beeGpsTime *prev, const struct beeGpsTime *cur, double *ppb) {
+    int64_t du = cur->utc - prev->utc;
+    if (!prev->when || cur->step || du <= 0 || du > BEE_GPS_VALID_S)
+        return 0;
+    double ticks = (double) d48(cur->ts, prev->ts) + (cur->sub - prev->sub) / 256.0;
+    double nominal = du * GPS_TICKS_PER_S;
+    double rate = (ticks / nominal - 1) * 1e9;
+    if (prev->rate != BEE_GPS_RATE_UNKNOWN && cur->rate != BEE_GPS_RATE_UNKNOWN) {
+        if (fabs(ticks - nominal * (1 + cur->rate * 1e-9)) > GPS_PAIR_TOLERANCE_TICKS)
+            return 0; // a mislabeled second
+    } else if (fabs(rate) > 1e6) {
+        return 0; // more than 1000 ppm: not a crystal
+    }
+    *ppb = rate;
+    return 1;
+}
+
+int beeGpsUtc(const struct beeGpsTime gps[2], int64_t ts, int64_t *sec, double *ns) {
+    const struct beeGpsTime *cur = &gps[0], *prev = &gps[1];
+    if (!cur->when)
+        return 0;
+    double rate = cur->rate;
+    int64_t du = cur->utc - prev->utc;
+    int pair = prev->when && !cur->step && du > 0 && du <= BEE_GPS_VALID_S;
+    if (cur->rate == BEE_GPS_RATE_UNKNOWN || (pair && prev->rate != BEE_GPS_RATE_UNKNOWN)) {
+        double r;
+        if (!pair || !beeGpsPairRate(prev, cur, &r))
+            return 0;
+        if (cur->rate == BEE_GPS_RATE_UNKNOWN)
+            rate = r;
+    }
+    double ticks = (double) d48(ts, cur->ts) - cur->sub / 256.0;
+    if (fabs(ticks) > BEE_GPS_VALID_S * GPS_TICKS_PER_S)
+        return 0;
+    double s = ticks / (GPS_TICKS_PER_S * (1 + rate * 1e-9));
+    double whole = floor(s);
+    *sec = cur->utc + (int64_t) whole;
+    *ns = (s - whole) * 1e9;
+    return 1;
+}
+
 int beeExtFrame(struct client *c, char *p, char *eod, int64_t now, struct messageBuffer *mb) {
     uint8_t t = (uint8_t) *p;
+    if (t == 0xE6) {
+        // GPS time sync: kept per connection (latest two), shown in readsbee.json, never forwarded.
+        // Decoded whether or not the feeder agreed bit 0.
+        struct beeGpsTime g;
+        int r = beeGpsTimeParse(p, eod, &g);
+        if (r == 0)
+            return 0;
+        if (r > 0) {
+            beeCountExt(c, p, r);
+            if (beeDrop(c))
+                return r;
+            g.when = now;
+            c->bee.gps[1] = c->bee.gps[0];
+            c->bee.gps[0] = g;
+            countFrame(c, BEE_FT_GPS_TIME);
+            return r;
+        }
+    }
     if (t == 0xED || t == 0xEF) {
         uint8_t body[256];
         int blen = 0;
@@ -396,7 +492,8 @@ int beeExtFrame(struct client *c, char *p, char *eod, int64_t now, struct messag
     int len = beeExtFrameLen(p, eod);
     if (len > 0) {
         beeCountExt(c, p, len);
-        if ((t == 0xEC || t == 0xED || t == 0xEF) && !blocked(c))
+        // 0xE6: only 'P' is a known letter, others are reserved (skipped like an unknown type)
+        if ((t == 0xEC || t == 0xED || t == 0xEF || (t == 0xE6 && p[1] == 'P')) && !blocked(c))
             countFrame(c, BEE_FT_BAD);
     }
     return len;
@@ -436,7 +533,7 @@ char *beeJsonAircraft(char *p, char *end, struct aircraft *a, int64_t now) {
     return p;
 }
 
-static const char *ftNames[BEE_FT_COUNT] = { "adsl", "rid", "uat", "uat_mlat", "bad" };
+static const char *ftNames[BEE_FT_COUNT] = { "adsl", "rid", "uat", "uat_mlat", "bad", "gps_time" };
 
 char *beeStatsJson(char *p, char *end, const uint32_t *frames) {
     p = safe_snprintf(p, end, ",\"readsbee\":{");
