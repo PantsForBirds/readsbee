@@ -14,8 +14,8 @@ history; this document has no version number). Rules that came out of the review
 - **The signal byte of every frame type is the Beast power byte** (0 = no level), `0xED` and
   `0xEF` included, with its −100 dBm floor and −40 dBm ceiling: ADS-L below −100 dBm reads 1,
   Remote ID above −40 dBm reads 255 (§2).
-- Bit 0 is reserved; the protocols are bits 1–3: bit 1 `0xED` ADS-L, bit 2 `0xEF` Remote ID,
-  bit 3 upper-case UAT. All three is `8E`.
+- Bit 0 is GPS time sync (`0xE6`, §12); the protocols are bits 1–3: bit 1 `0xED` ADS-L, bit 2 `0xEF` Remote ID,
+  bit 3 upper-case UAT. All four is `8F`.
 - The feeder sends the agreed frames (query bits AND answer bits) as soon as it has read the
   answer. Every frame says what it is, so frames in flight can't be misread and there is no
   switch point (§7.1).
@@ -23,9 +23,12 @@ history; this document has no version number). Rules that came out of the review
   feed, no proof frame.
 - **2026-11-07 (admin): dBm signal levels and the confirm frame `C` removed.** Every signal byte
   is the power byte; capability bit 0 and the letter `C` are reserved, bits 1–3 keep their place.
+- **2026-11-26 (admin): capability bit 0 = GPS time sync frames `0xE6` (§12).** Bit 0 was briefly dBm signal levels
+  before 2026-11-07 (never deployed). Mode S timestamps stay 12 MHz; an `0xE6 'P'` frame per PPS edge puts them on
+  UTC.
 
 Reference code: [`tests/readsbee_proto.py`](../tests/readsbee_proto.py) (`python3 tests/readsbee_proto.py` → `vectors ok`, checks
-[`tests/vectors/feed_vectors.json`](../tests/vectors/feed_vectors.json): 43 vectors; the `stream_query_answer*` vectors carry
+[`tests/vectors/feed_vectors.json`](../tests/vectors/feed_vectors.json): 47 vectors; the `stream_query_answer*` vectors carry
 both directions in `exchange`: query, answer, then the agreed frames). Stock-server measurements (§10:
 `test_caps_stock.py`, `results/`, `results.txt`, `results-uat-msgtype.txt`) were made outside this
 repo and aren't included.
@@ -38,14 +41,18 @@ repo and aren't included.
 | `0xE3` | readsb receiver ID | 8 | readsb |
 | `0xE4` | readsb feed UUID | 36 ASCII | readsb |
 | **`0xE5`** | **capabilities** | letter `Q` / `A` (`C` reserved), ver1 bits2 (never `0x1a`) | new (§7) |
+| **`0xE6`** | **GPS time sync** | letter `P`, ts6 sub1 utc5 flags1 rate3 (flags never `0x1a`) | new (§12) |
 | `0xEC` | UAT | letter `s l u` / **`S L U`**, ts6 rssi1 + 30 / 48 / 552 | ADSBee + readsb; upper case new |
 | **`0xED`** | **ADS-L** | letter `A B X`, ts6 sig1 rep1 + on-air (1 + L) | new |
 | **`0xEF`** | **Remote ID** | letter `B C E W N`, ts6 sig1 mac6 + ODID (25 or 3 + 25n) | new |
 
 **Why these codes.** Re-checked free in readsb dev (`bf8f8fd`; again for the capabilities check at `e576cba`,
 2026-11-06), dump1090-fa, mlat-client, mlat-server, beast-splitter and ADSBee firmware (main,
-`ads-l`, `t0948-*`): `E1 E2 E5–E7 EA ED EF–FF`. The capabilities check takes `0xE5`: next to `0xE4`, the other
+`ads-l`, `t0948-*`): `E1 E2 E7 EA EE F0–FF` (`E5`, `E6`, `ED`, `EF` taken). The capabilities check takes `0xE5`: next to `0xE4`, the other
 connection-start frame.
+- `0xE6` for GPS time sync, next to `0xE5`: both are per-connection control frames, not packets. Re-checked free
+  2026-11-24 in readsb dev `88877b9`, dump1090-fa `465e063`, mlat-client (wiedehopf `28ae4f7`, mutability `fe70767`),
+  mlat-server `c2d35b7` (no Beast parser) and beast-splitter `82ba366`. Also free in ADSBee firmware main.
 - `0xED` sits next to UAT `0xEC`: both are CC13xx sub-GHz packets with the same timestamp path.
 - `0xEF` for Remote ID. `0xEE` is skipped on purpose: early drafts used it with a different
   layout, and test captures may exist.
@@ -75,7 +82,7 @@ connection-start frame.
   never use it for MLAT.
 - Every payload bounds itself, so there is no LEN byte (§3).
 - Largest frames, escaped worst case: UAT `U` 1 + 2 + 2 × 559 = 1121 (unchanged), Remote ID
-  pack 2 + 1 + 2 × 241 = 485, ADS-L 2 + 1 + 2 × 40 = 83.
+  pack 2 + 1 + 2 × 241 = 485, ADS-L 2 + 1 + 2 × 40 = 83, GPS time `P` 2 + 1 + 2 × 15 + 1 = 34.
 
 ## 3. Bounds and resync
 
@@ -84,6 +91,7 @@ connection-start frame.
 | UAT | the letter: 30 / 48 / 552 |
 | ADS-L | on-air length byte L (first payload byte): 1 + L bytes, L ≤ 31 |
 | Remote ID | first ODID byte: high nibble ≠ `F` → 25; `F` → pack: next bytes size (= 25) and count n (1–9), 3 + 25n |
+| GPS time | fixed: 16 bytes after the letter `P`; the flags byte (13th) must have its high bit set |
 
 A decoder that meets an unknown type, an unknown letter, or a bound that fails (L > 31, pack size
 ≠ 25, n > 9) skips to the next frame start: the next `0x1a` not followed by `0x1a`. The escape
@@ -170,13 +178,13 @@ answer  server -> feeder   1a E5 'A' ver f0 f1      6 bytes, sent once, only in 
 
 | bit | Feature | In the query (feeder can send) | In the answer (server accepts) |
 |---|---|---|---|
-| 0 | reserved: **never set, ignored** (was dBm signal levels, removed 2026-11-07; bits 1–3 kept their place, nothing renumbered) | 0 | 0; ignored by the feeder if set (readsbee before 2026-11-07 answered `8F`) |
+| 0 | `0xE6` GPS time sync (§12) | GNSS enabled on a board with a PPS input | decodes `0xE6`, wants UTC |
 | 1 | `0xED` ADS-L | sub-GHz radio in ADS-L mode with #409 clock | decodes `0xED` |
 | 2 | `0xEF` Remote ID | Remote ID receive on | decodes `0xEF` |
 | 3 | `0xEC` upper-case `S L U` | firmware with #409 clock fix | trusts / accepts `S L U` |
 | 4–13 | reserved | 0 | 0; ignored by the feeder |
 
-- After an answer the feeder sends **query bits AND answer bits** (known bits only, so never bit 0),
+- After an answer the feeder sends **query bits AND answer bits** (known bits only),
   **from the moment it has read the answer**, with no confirm frame. Frames in flight need no
   switch point: `0xED`, `0xEF` and `S L U` say what they are, readsbee decodes them from any feed
   (§11 item 6), and the signal byte means the same before and after. An answer of
@@ -241,6 +249,7 @@ so pings can't fill the receive window.
   `recv(sock, buf, 64, MSG_DONTWAIT)` until `EAGAIN`, feed the scanner while waiting, drop the
   bytes otherwise; after 5 s without an answer → plain.
 - Reporting: `0xED` only if bit 1, `0xEF` only if bit 2, UAT letter upper case only if bit 3.
+  `0xE6` only if bit 0, one per labeled PPS edge (§12.1).
   The `NO_UAT` variants still decide whether UAT goes out. The signal byte is the power byte on
   every feed, so feeds are grouped by protocol and bit 3 only.
 - On the answer: the feed's bits become query AND answer, in effect for the next frame.
@@ -251,8 +260,8 @@ so pings can't fill the receive window.
   connection, store the offered bits and `offered AND accept` (shown in readsbee.json), queue
   `1a E5 A 81 <accept>` and flush. No garbage counted for a valid frame. `A` from a client, a
   second `Q`, the reserved `C`: skipped as one 6-byte frame. Malformed: skip like an unknown type.
-- `accept` = bits 1–3 by default (`--readsbee-caps` narrows it, e.g. 4 = Remote ID only; bit 0
-  is never answered).
+- `accept` = bits 0–3 by default once `0xE6` is decoded (bits 1–3 until then) (`--readsbee-caps` narrows it,
+  e.g. 4 = Remote ID only).
 - Input is still treated the same for every feed : extension frames from a feed that
   didn't query are decoded anyway. The answer only steers what an ADSBee sends.
 - `0xE5` is never forwarded (outputs are rebuilt from decoded messages, §8).
@@ -391,3 +400,105 @@ Added with the dBm capability (withdrawn 2026-11-07, kept for the numbering):
 
 Still open: readsbee phase 2 scope (`S L U`,
 `0xED`, `0xEF`, now plus the `0xE5` answer); sub-GHz clock jitter (t-1056); BLE address type.
+
+## 12. GPS time sync `0xE6` (capability bit 0)
+
+Mode S timestamps stay on the feed's 12 MHz counter. A feeder whose counter is measured against a GNSS PPS sends,
+for each PPS edge it can label, the 12 MHz count of that edge and its UTC second. A server can then put every
+timestamp on that connection on UTC.
+
+**Why 12 MHz + a sync frame, not 1 GHz timestamps:**
+- wiedehopf mlat-server doesn't use the GPS shortcut (the same-epoch identity predictor is commented out), so 1 GHz
+  stamps buy little.
+- 12 MHz rounding is 24 ns rms (83.3 ns / √12), the size of the ADSBee's PPS fit (adsbee #462).
+- No existing frame changes, and there's no per-connection timestamp mode.
+- Any feeder with a PPS-measured sample counter can send it.
+
+### 12.1 Frame
+
+```
+1a E6  P  ts6  sub1  utc5  flags1  rate3          16 bytes after the letter, escaped except flags
+```
+
+| Field | Bytes | Meaning |
+|---|---|---|
+| `P` | 1 | letter (PPS): on this connection's Mode S clock. Other letters are reserved and skipped like an unknown type |
+| ts6 | 6 | 12 MHz count of the PPS edge of second utc5, on the clock of this connection's `0x32`/`0x33` frames (low 48 bits, wrapping like them) |
+| sub1 | 1 | fraction of a tick in 1/256 (0.33 ns): the edge is at **ts6 + sub1/256** ticks |
+| utc5 | 5 | POSIX seconds (UTC since 1970, no leap seconds) of that edge, unsigned |
+| flags1 | 1 | `0x80` always set (so never `0x1a`, never escaped). `0x01` **step**: the fit restarted or was re-anchored since the last frame, so don't derive a rate across it. Other bits reserved: 0, ignored |
+| rate3 | 3 | signed ppb: one GNSS second = 12 000 000 × (1 + rate × 10⁻⁹) ticks (±8 388 607). `80 00 00` = unknown, for feeders that don't measure one |
+
+- **When.** One frame per labeled PPS edge while the feeder's fit is in sync, on connections that agreed bit 0 (§7).
+  Nothing else: no frame means no new information. ADSBee sends it after the RMC that labels the edge, 0.1 to about
+  1 s after the edge.
+- **Wire.** ts6, sub1, utc5 and rate3 are escaped (§2): 19 to 34 bytes. Mode S frames stamped after an edge may arrive
+  before its `0xE6`; nothing depends on the order.
+- **Choices.** sub1 keeps the edge finer than the fit with one scale. utc5 needs no epoch or leap-second table and
+  doesn't wrap in 2106. rate3 covers crystals (±200 ppm) 40 times over; 1 ppb over a second is 1 ns.
+
+### 12.2 Capability bit 0
+
+- **The feeder sets bit 0 while GNSS is enabled in its settings, on a board with a PPS input.** A feeder that never
+  gets a PPS simply sends no frames.
+- A change to the GNSS setting reconnects the TCP Beast feeds, so the query is asked again (ADSBee: add
+  `gnss_enabled` to `FeedConfigCRC`).
+- **Servers** answer bit 0 only if they decode `0xE6`. Stock readsb, dump1090-fa and mlat-client never answer (§7), so
+  they never see it. That matters: stock readsb `--net-ingest` counts `0xE6` as garbage and, with a quiet sky,
+  **closes the feed after 28 frames**; dump1090-fa's one-byte resync could find a bogus `1a 32` inside it.
+
+### 12.3 How a server uses it
+
+For a frame stamped `ts` on the same connection, from the latest `0xE6` (ts6, sub1, utc5, rate3):
+
+```
+d   = (ts - ts6) as a signed 48-bit difference            # the counter wraps every 271.5 days
+s   = (d - sub1/256) / (12e6 × (1 + rate3 × 1e-9))
+UTC = utc5 + s                                            # valid while |s| ≤ 4
+```
+
+- **4 s.** A frame is good for 4 s around its edge. After that the connection has relative 12 MHz time only, until
+  the next frame.
+- **Truncation.** Frame timestamps are truncated (ADSBee: floor of 48 MHz / 4), so a frame was on average half a tick
+  (41.7 ns) after ts. Add it for absolute time; between receivers with the same convention it cancels.
+- **Consecutive frames** n, n+1 without `step`: (ts6 + sub1/256)ₙ₊₁ − (ts6 + sub1/256)ₙ must equal
+  (utc5ₙ₊₁ − utc5ₙ) × 12e6 × (1 + rate × 10⁻⁹) within 1 µs, else drop the pair (a mislabeled second). With rate
+  `80 00 00` this difference is the rate, so the server needs two frames before the first conversion.
+- **step**: start the rate estimate again; don't use the pair across it.
+- **Leap seconds**: utc5 is POSIX, so frames stop for a couple of seconds around one and the next has `step`.
+
+The instant is unchanged: UTC is the time of the instant the Beast timestamp marks (ADSBee: dump1090's, adsbee
+#308). It applies to every upper-case extension frame and every `0x32`/`0x33` frame on the connection (ADSBee 1090U:
+UAT and ADS-L add the CC1312 sync, 0.11 µs rms; Remote ID is ordering only, as §5), not to lower-case or ts6 = 0
+frames (§2).
+
+### 12.4 Firmware sketch (ADSBee 1090, for after approval)
+
+- **RP2040 → ESP32.** One struct in `RP2040DeviceStatus`, the status the RP2040 already writes about every 100 ms:
+  ```
+  struct __attribute__((packed)) PPSTime {
+      uint64_t edge_mlat_48mhz_counts;  // the fit's edge of utc_seconds on the MLAT counter (48 MHz)
+      uint16_t edge_sub_counts;         // + /1024 of a count
+      uint64_t utc_seconds;             // POSIX
+      int32_t rate_ppb;                 // PPSClock::GetRateErrorPPB()
+      uint8_t step;                     // fit restarted or re-anchored since the previous seq
+      uint8_t seq;                      // + 1 per labeled edge while in sync
+  };
+  ```
+  `GNSSReceiver` fills it when an RMC labels an edge and the fit is in sync (the fit's edge, as `MLATCountsToUTC`
+  uses), and bumps `seq`.
+- **ESP32.** In `IPWANTask`, on a new `seq`, `BeastReporter::WriteGPSTimeFrame` builds the frame once, with
+  ts6 = (E >> 12) mod 2⁴⁸ and sub1 = (E >> 4) & 0xFF for E = edge × 1024 + sub (the same `>> 2` as Mode S), and
+  appends it to each TCP Beast feed whose agreed bits have bit 0. Nothing otherwise.
+- Add `kBeastCapGPSTime = 1 << 0` to `kBeastCapsKnown`/`kBeastCapsSendable`; `BeastCapsToOffer()` sets it while
+  `gnss_enabled`. No change to any other frame.
+
+### 12.5 readsbee side (sketch)
+
+- `readBeast` decodes `0xE6 'P'`, keeps the latest two frames per connection and shows them in `readsbee.json`.
+  Frames from a feed that didn't agree bit 0 are decoded too (§11 item 6). `0xE6` is never forwarded (§8).
+- Today's readsbee already skips `0xE6` whole without counting garbage, and answers `8E`, so no frame is sent to it.
+
+### 12.6 Open points
+
+1. Using `0xE6` in our MLAT server (absolute time, or only rate) is a later step.

@@ -66,6 +66,16 @@ def feed():
         b, n = cbytes(v["hex"])
         out.append(f'    {{ {cstr(v["name"])}, {b}, {int(r is not None)}, {repr(r[0]) if r else "0"}, {r[2] if r else 0} }},')
     out.append("};")
+    # 0xE6 GPS time sync frames on their own (FEED-PROTOCOL.md section 12)
+    out.append("static const struct gpsVec gpsVecs[] = {")
+    for v in vecs:
+        if len(v.get("decoded", [])) != 1 or v["decoded"][0]["type"] != P.T_GPS_TIME:
+            continue
+        d = v["decoded"][0]
+        b, n = cbytes(v["hex"])
+        rate = "INT32_MIN" if d["rate_ppb"] is None else str(d["rate_ppb"])
+        out.append(f'    {{ {cstr(v["name"])}, {b}, {n}, {d["ts"]}LL, {d["sub"]}, {d["utc"]}LL, {int(d["step"])}, {rate} }},')
+    out.append("};")
     return out
 
 

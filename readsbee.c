@@ -789,6 +789,31 @@ void beeWriteJson(int64_t now) {
                         c->bee.timing.type, c->bee.timing.clock == BEE_CLK_MODES ? "modes"
                         : c->bee.timing.clock == BEE_CLK_UNSYNCED ? "unsynced" : "not_mlat", c->bee.timing.epoch,
                         (now - c->bee.timing.when) / 1000.0);
+            const struct beeGpsTime *g = c->bee.gps;
+            if (g[0].when) {
+                // latest 0xE6 frame (§12); usable: a timestamp at its edge converts to UTC (rate known
+                // or from the pair, and the pair agrees)
+                int64_t sec;
+                double ns, pr;
+                int usable = beeGpsUtc(g, g[0].ts, &sec, &ns);
+                p = safe_snprintf(p, end, ",\"gps_time\":{\"utc\":%" PRId64 ",\"ts\":%" PRId64 ",\"sub\":%u,",
+                        g[0].utc, g[0].ts, g[0].sub);
+                if (g[0].rate == BEE_GPS_RATE_UNKNOWN)
+                    p = safe_snprintf(p, end, "\"rate_ppb\":null,");
+                else
+                    p = safe_snprintf(p, end, "\"rate_ppb\":%d,", g[0].rate);
+                p = safe_snprintf(p, end, "\"step\":%s,\"age\":%.1f,", g[0].step ? "true" : "false",
+                        (now - g[0].when) / 1000.0);
+                if (g[1].when)
+                    p = safe_snprintf(p, end, "\"prev_utc\":%" PRId64 ",", g[1].utc);
+                else
+                    p = safe_snprintf(p, end, "\"prev_utc\":null,");
+                if (beeGpsPairRate(&g[1], &g[0], &pr))
+                    p = safe_snprintf(p, end, "\"pair_rate_ppb\":%.1f,", pr);
+                else
+                    p = safe_snprintf(p, end, "\"pair_rate_ppb\":null,");
+                p = safe_snprintf(p, end, "\"usable\":%s}", usable ? "true" : "false");
+            }
             p = safe_snprintf(p, end, "}");
             sep = ",\n";
         }

@@ -5878,7 +5878,7 @@ static int readBeast(struct client *c, int64_t now, struct messageBuffer *mb) {
                     continue;
                 }
             }
-            // readsbee: 0xED ADS-L / 0xEF Remote ID decoded, other extension frames skipped
+            // readsbee: 0xED ADS-L / 0xEF Remote ID / 0xE6 GPS time decoded, other extension frames skipped
             // whole without counting as garbage. Never forwarded.
             int len = beeExtFrame(c, p, c->eod, now, mb);
             if (len == 0)

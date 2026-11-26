@@ -20,7 +20,8 @@ enum beeFrameType {
     BEE_FT_RID,       // 0xEF Remote ID, decoded
     BEE_FT_UAT,       // 0xEC s/l/u/S/L/U, any clock
     BEE_FT_UAT_MLAT,  // 0xEC S/L/U with ts on the Mode S clock (ts != 0)
-    BEE_FT_BAD,       // 0xEC/0xED/0xEF with an unknown letter, failed bounds, bad CRC / layout
+    BEE_FT_BAD,       // 0xEC/0xED/0xEF/0xE6 'P' with an unknown letter, failed bounds, bad CRC / layout
+    BEE_FT_GPS_TIME,  // 0xE6 'P' GPS time sync, decoded
     BEE_FT_COUNT
 };
 
@@ -39,6 +40,20 @@ struct beeTiming {
     uint8_t type;    // Beast type byte
     uint16_t epoch;  // +1 each time the sub-GHz clock drops from synced to ts 0 (mode switch:
                      // the clock is re-based after it, don't compare timestamps across epochs)
+};
+
+// one GPS time sync frame 0xE6 'P' (FEED-PROTOCOL.md §12): the PPS edge of POSIX second utc is
+// at 12 MHz tick ts + sub / 256 on this connection's Mode S clock
+#define BEE_GPS_RATE_UNKNOWN INT32_MIN // rate3 80 00 00
+#define BEE_GPS_BODY_LEN 16            // after the letter: ts6 sub1 utc5 flags1 rate3
+#define BEE_GPS_VALID_S 4              // a frame is good for 4 s around its edge
+struct beeGpsTime {
+    int64_t ts;      // 12 MHz ticks, 48 bits
+    int64_t utc;     // POSIX seconds
+    int64_t when;    // ms, arrival (0 = none)
+    int32_t rate;    // ppb, BEE_GPS_RATE_UNKNOWN
+    uint8_t sub;     // 1/256 tick
+    uint8_t step;    // fit restarted / re-anchored since the frame before
 };
 
 // carried on modesMessage for frames readsbee decoded itself (ADS-L, Remote ID on the globe)
@@ -77,11 +92,11 @@ enum beeReason {
 };
 
 // capabilities check 0xE5 (FEED-PROTOCOL.md §7): feature bits
-// bit 0 (0x01) reserved: never set, ignored (was dBm signal levels, removed 2026-11-07)
+#define BEE_CAP_GPS_TIME 0x01  // 0xE6 (2026-11-26; was dBm signal levels before 2026-11-07, never deployed)
 #define BEE_CAP_ADSL 0x02      // 0xED
 #define BEE_CAP_RID 0x04       // 0xEF
 #define BEE_CAP_UAT_UPPER 0x08 // 0xEC S/L/U
-#define BEE_CAP_KNOWN 0x0E
+#define BEE_CAP_KNOWN 0x0F
 #define BEE_CAPS_LEN 6         // 1a E5 letter ver f0 f1
 #define BEE_CAPS_VERSION 1
 
@@ -105,6 +120,7 @@ struct beeClient {
     uint16_t capsOffered;        // bits in the feeder's query
     uint16_t capsActive;         // offered AND answered: what the feeder sends after the answer
     uint8_t capsAnswered;        // a query was answered on this connection
+    struct beeGpsTime gps[2];    // latest 0xE6 frame, and the one before it
 };
 
 struct beeUuid {
@@ -219,6 +235,17 @@ int beeApiRemoteId(uint64_t filter_uuid, int pad, char **buf, int *len);
 // readBeast: p at 0xE5. Returns the bytes to skip from p, 0 incomplete, -1 malformed.
 // *answerLen = BEE_CAPS_LEN when answer[] must be sent back on this connection.
 int beeCapsFrame(struct client *c, const char *p, const char *eod, char *answer, int *answerLen);
+
+// 0xE6: p at the type byte. Returns the bytes to skip from p, 0 incomplete, -1 malformed (not 'P',
+// lone 0x1a inside, flags without 0x80).
+int beeGpsTimeParse(const char *p, const char *eod, struct beeGpsTime *out);
+// FEED-PROTOCOL.md §12.3: UTC of a frame stamped ts (12 MHz, this connection's Mode S clock) from
+// the connection's latest 0xE6 frames. 1 = *sec (POSIX) + *ns, 0 = no conversion: no frame, ts more
+// than 4 s from the edge, no rate yet (rate unknown, no good pair), or the two latest frames
+// (consecutive, no step) disagree by more than 1 us. Not used for MLAT or any output yet.
+int beeGpsUtc(const struct beeGpsTime gps[2], int64_t ts, int64_t *sec, double *ns);
+// rate of the pair prev -> cur in ppb; 0 = none (step, more than 4 s apart, inconsistent)
+int beeGpsPairRate(const struct beeGpsTime *prev, const struct beeGpsTime *cur, double *ppb);
 
 // decoders (unit tested in beetests.c)
 struct beeAdsl {

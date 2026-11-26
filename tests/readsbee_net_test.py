@@ -341,7 +341,7 @@ def test_extension_frames(ip):
                   lambda x: any(r.get("uuid") == V2 and r["frames"]["rid"] >= 3 for r in x.get("receivers", [])))
         r = next((r for r in (rb or {}).get("receivers", []) if r.get("uuid") == V2), {})
         fr = r.get("frames", {})
-        check(fr == {"adsl": 90, "rid": 3, "uat": 16, "uat_mlat": 7, "bad": 3}, f"readsbee.json frames per receiver: {fr}")
+        check(fr == {"adsl": 90, "rid": 3, "uat": 16, "uat_mlat": 7, "bad": 3, "gps_time": 0}, f"readsbee.json frames per receiver: {fr}")
         ro = next((r for r in (rb or {}).get("receivers", []) if r.get("uuid") == GOOD), {})
         check(ro.get("frames", {}).get("adsl") == 5 and ro["frames"]["uat"] == 0, f"other receiver: 5 ADS-L (random address, paraglider) {ro.get('frames')}")
         check(r.get("last_timed", {}).get("clock") in ("modes", "not_mlat", "unsynced"), f"timing kept: {r.get('last_timed')}")

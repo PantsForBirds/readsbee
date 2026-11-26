@@ -6,14 +6,19 @@
 1. Every feeder -> server vector of tests/vectors/feed_vectors.json over its own connection: a
    query gets exactly one answer, nothing else does, and no connection is closed. The exchange
    vectors run in order: query, the answer (byte-exact), then the agreed frames.
-2. The answer bytes for --readsbee-caps default / 14 / 4 / 0 equal the server -> feeder vectors;
-   reserved bit 0 is never answered.
+2. The answer bytes for --readsbee-caps default / 15 / 14 / 4 / 0 equal the server -> feeder vectors;
+   bit 0 (GPS time sync 0xE6, since 2026-11-26) is answered by default: 8f.
 3. Feeder model: answer seen after 0 s, 1 s or 6 s (5 s timeout: plain), a server answering
    Remote ID only, and a feeder that never queries. The feeder sends the agreed frames as soon as
    it has read the answer (no confirm frame). Every signal byte is a power byte: readsb's Beast
    output must carry each Mode S frame's byte back, and the drones' rssi must match theirs.
 4. aircraft.json / remoteid.json: rssi in dBFS from the power byte, no "dbm" field.
-5. --captures DIR: the t-1069 ADSBee captures replay (Mode S aircraft and the bench drone).
+5. GPS time sync 0xE6 (--net-ingest, the strict garbage rule): query 8f -> answer 8f; 3000 DF17 frames
+   with an 0xE6 after every 3rd and malformed ones (flags without 0x80, cut short, reserved letter)
+   among them: every DF17 frame comes back on the Beast output, no 0xE6 does, the feed stays open,
+   readsbee.json shows the latest frame (utc, rate, step, age, pair) and the counts; a feed that
+   never queried is decoded too.
+6. --captures DIR: the t-1069 ADSBee captures replay (Mode S aircraft and the bench drone).
 """
 import json
 import math
@@ -151,12 +156,12 @@ def test_vectors(tmp):
 
 def test_answers(tmp):
     vecs = {v["name"]: v for v in json.loads((D / "vectors" / "feed_vectors.json").read_text())}
-    for caps, name in ((None, "answer_all"), ("15", "answer_all"), ("14", "answer_all"),
+    for caps, name in ((None, "answer_bit0_set"), ("15", "answer_bit0_set"), ("14", "answer_all"),
                        ("4", "answer_rid_only"), ("0", "answer_none")):
         rs = Readsb(tmp, [f"--readsbee-caps={caps}"] if caps else [])
         try:
             s = socket.create_connection(("127.0.0.1", PORT_IN))
-            s.sendall(P.enc_uuid(UUID) + P.enc_caps("Q", 15))  # an older feeder that still offers bit 0
+            s.sendall(P.enc_uuid(UUID) + P.enc_caps("Q", 15))  # a feeder with GNSS + PPS: offers bit 0
             back, _ = recv_some(s, 6, 2.0)
             s.close()
             check(back.hex() == vecs[name]["hex"], f"--readsbee-caps={caps or 'default'}: answer {back.hex()} = {name}")
@@ -310,6 +315,112 @@ def test_json(tmp):
         rs.stop()
 
 
+def gps_series(n, utc0=1795483693, rate=17300, ts0=0x00_12_34_56_78_9B << 8):
+    """n consecutive labeled PPS edges (1/256 ticks), counter rate ppb fast."""
+    out = []
+    for k in range(n):
+        e = ts0 + round(k * P.TICKS_PER_S * (1 + rate * 1e-9) * 256)
+        out.append(dict(ts=(e >> 8) % P.TS_MOD, sub=e & 0xFF, utc=utc0 + k, step=False, rate_ppb=rate))
+    return out
+
+
+def test_gps_time(tmp):
+    status = Path(tmp) / "status"
+    status.mkdir(exist_ok=True)
+    rs = Readsb(tmp, ["--net-ingest", "--net-receiver-id", f"--net-uuid-status-dir={status}"])
+    try:
+        # the query 8f gets the answer 8f
+        out = socket.create_connection(("127.0.0.1", PORT_OUT))
+        out.settimeout(0.2)
+        s = socket.create_connection(("127.0.0.1", PORT_IN))
+        s.sendall(P.enc_uuid(UUID) + P.enc_caps("Q", P.CAP_KNOWN))
+        back, _ = recv_some(s, 6, 2.0)
+        check(back.hex() == "1ae541818f80", f"0xE6: query 8f -> answer {back.hex()}")
+        agreed = P.negotiate(P.CAP_KNOWN, P.AnswerScanner().feed(back)[1])
+        # 3000 DF17 frames, an 0xE6 after every 3rd; every 50th 0xE6 slot a malformed one instead
+        n, sent, bad, reserved = 3000, 0, 0, 0
+        series = gps_series(n // 3)
+        good = None
+        for i in range(n):
+            b = P.enc_mode_s(df17(0x710000 + i), i, 100)
+            k = i // 3
+            if i % 3 == 2 and agreed & P.CAP_GPS_TIME:
+                g = series[k]
+                w = P.enc_gps_time(g["ts"], g["sub"], g["utc"], g["step"], g["rate_ppb"])
+                if k % 50 == 10:
+                    w = w[:15] + b"\x01" + w[16:]          # flags without 0x80
+                    bad += 1
+                elif k % 50 == 20:
+                    w = w[:11]                             # cut short: the next Mode S frame starts inside
+                    bad += 1
+                elif k % 50 == 30:
+                    w = w[:2] + b"Q" + w[3:]               # reserved letter: skipped like an unknown type
+                    reserved += 1
+                else:
+                    sent += 1
+                    good = g
+                b += w
+            s.sendall(b)
+        s.sendall(P.enc_mode_s(df17(0x70FFFF), n, 100))  # a last frame, so a trailing 0xE6 is complete
+        time.sleep(2.0)
+        open_ = still_open(s)
+        raw = bytearray()
+        try:
+            while True:
+                chunk = out.recv(65536)
+                if not chunk:
+                    break
+                raw.extend(chunk)
+        except socket.timeout:
+            pass
+        frames = P.Decoder().feed(bytes(raw))
+        df17_back = {int.from_bytes(f.body[8:11], "big") for f in frames if f.type == 0x33}
+        n_back = len([x for x in df17_back if 0x70FFFF <= x < 0x710000 + n])
+        e6_back = sum(f.type == P.T_GPS_TIME for f in frames)
+        check(open_ and n_back == n + 1, f"0xE6 among Mode S: feed open {open_}, DF17 back {n_back}/{n + 1}")
+        check(e6_back == 0, f"0xE6 never forwarded: {e6_back} in the Beast output")
+
+        # a feeder that never queried: its 0xE6 frames are decoded too
+        t = socket.create_connection(("127.0.0.1", PORT_IN))
+        uuid2 = "0bee0003-8172-d18c-0bee-0003ffffffff"
+        ser2 = gps_series(2, utc0=1795490000)  # sent with rate unknown (80 00 00)
+        t.sendall(P.enc_uuid(uuid2) + b"".join(P.enc_mode_s(df17(0x720000 + k), k, 100)
+                                               + P.enc_gps_time(g["ts"], g["sub"], g["utc"], False, None)
+                                               for k, g in enumerate(ser2)) + P.enc_mode_s(df17(0x72FFFF), 9, 100))
+
+        def recv_of(x, u):
+            return next((r for r in x.get("receivers", []) if r.get("uuid") == u), {})
+        js = None
+        end = time.time() + 15
+        while time.time() < end:
+            try:
+                js = json.loads((status / "readsbee.json").read_text())
+                if recv_of(js, UUID).get("gps_time", {}).get("utc") == good["utc"] and recv_of(js, uuid2).get("gps_time"):
+                    break
+            except (OSError, ValueError):
+                pass
+            time.sleep(0.5)
+        r1, r2 = recv_of(js or {}, UUID), recv_of(js or {}, uuid2)
+        g1 = r1.get("gps_time", {})
+        fr = r1.get("frames", {})
+        check(g1.get("utc") == good["utc"] and g1.get("ts") == good["ts"] and g1.get("sub") == good["sub"]
+              and g1.get("rate_ppb") == 17300 and g1.get("step") is False and 0 <= g1.get("age", -1) < 15
+              and g1.get("prev_utc") == good["utc"] - 1 and abs((g1.get("pair_rate_ppb") or 0) - 17300) < 1
+              and g1.get("usable") is True, f"readsbee.json gps_time: {g1}")
+        check(fr.get("gps_time") == sent and fr.get("bad") == bad and r1.get("ext", {}).get("e6") == sent + bad + reserved,
+              f"readsbee.json counts: gps_time {fr.get('gps_time')}/{sent}, bad {fr.get('bad')}/{bad}, "
+              f"ext e6 {r1.get('ext', {}).get('e6')}/{sent + bad + reserved}")
+        g2 = r2.get("gps_time", {})
+        check(g2.get("utc") == ser2[1]["utc"] and g2.get("rate_ppb", 0) is None and g2.get("prev_utc") == ser2[0]["utc"]
+              and g2.get("usable") is True and "caps" not in r2,
+              f"feed without a query: 0xE6 decoded, rate from the pair: {g2}")
+        s.close()
+        t.close()
+        out.close()
+    finally:
+        rs.stop()
+
+
 def test_captures(tmp, d):
     for name in ("beast.bin", "readsbee.bin"):
         data = (Path(d) / name).read_bytes()
@@ -340,6 +451,7 @@ def main():
     test_answers(tmp)
     test_json(tmp)
     test_feeder(tmp)
+    test_gps_time(tmp)
     if CAPTURES:
         test_captures(tmp, CAPTURES)
     subprocess.run(["rm", "-rf", tmp])
